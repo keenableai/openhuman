@@ -19,6 +19,9 @@ use tinytools_agent::dialect::{
     CodeDialect, NativeDialect, PFormatDialect, ToolDialect, XmlDialect,
 };
 
+#[path = "factory_workflows.rs"]
+mod workflows;
+
 impl OpenHumanSessionHost {
     /// Returns whether `agent_id` resolves to a runnable definition for this
     /// configuration. This is deliberately the same resolution path used by
@@ -390,7 +393,7 @@ impl OpenHumanSessionHost {
             None => SystemPromptBuilder::with_defaults(),
         };
         let post_turn_hooks: Vec<Arc<dyn crate::agent::hooks::PostTurnHook>> =
-            crate::agent::hooks::embedder_post_turn_hooks();
+            crate::agent::hooks::turn_post_turn_hooks();
 
         // Best-effort prewarm from the shared Composio cache. This avoids
         // building the session with a knowingly stale `&[]` integration view
@@ -800,14 +803,7 @@ impl OpenHumanSessionHost {
             .workspace_dir(config.workspace_dir.clone())
             .action_dir(config.action_dir.clone())
             .workspace_descriptor(workspace_descriptor)
-            .workflows(if host_only {
-                Vec::new()
-            } else {
-                let mut catalogue = crate::skills::load_workflow_metadata(&config.workspace_dir);
-                #[cfg(feature = "flows")]
-                catalogue.extend(crate::flows::catalogue::flow_entries(config));
-                catalogue
-            })
+            .workflows(workflows::session_workflows(config, host_only))
             .post_turn_hooks(post_turn_hooks)
             .agent_definition_name(agent_id.to_string())
             .omit_memory_context(effective_omit_memory_context)

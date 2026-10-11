@@ -9,7 +9,9 @@
 mod attachment_input;
 mod memory_ingest;
 mod permanent;
+mod post_commit;
 mod tool_rules;
+mod transcript;
 #[path = "runtime_session_turn.rs"]
 mod turn;
 pub(super) use turn::begin_turn_resume;
@@ -21,10 +23,8 @@ use tinyagents_runtime::{
     CommitReceipt, ResumePreparation, SessionBuilder, SessionTerminal, ToolSnapshot,
     TranscriptTarget, TurnPreparation,
 };
-use tinyagents_session::transcript::TranscriptMeta;
 use tinyinference_llm::message::Message;
 
-use crate::agent::session_store::transcripts_or_files;
 use crate::agent::{
     message_convert::{user_message_from_text, user_text_with_markers},
     session_host::{
@@ -58,6 +58,10 @@ pub(super) struct OpenHumanSessionState {
     pub(super) reply_language_directive: Option<String>,
     pub(super) time_zone: Option<String>,
     prelude: Option<OpenHumanTurnPrelude>,
+    /// The previous turn's deferred post-commit work (thread-goal
+    /// accounting). The next turn awaits it before loading the goal
+    /// (`post_commit::await_pending`).
+    pending_post_commit: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Owned host-only inputs used by the async runtime preparation hook.
@@ -135,9 +139,8 @@ struct OpenHumanTurnToolSurface {
     agent_definition_name: String,
 }
 
-/// Per-session product observations that were formerly scattered across the
-/// legacy `core_turn` loop. Generic history, raw transcript data and prefix
-/// state intentionally do not appear here.
+/// Per-session product observations formerly scattered across the legacy
+/// `core_turn` loop. Generic history, raw transcript and prefix state are not here.
 #[derive(Default)]
 struct OpenHumanTurnPreludeMutable {
     last_memory_context: Option<String>,
@@ -159,10 +162,11 @@ struct OpenHumanTurnPreludeMutable {
     connected_integrations: Vec<crate::agent::prompts::ConnectedIntegration>,
     connected_integrations_initialized: bool,
     connected_integrations_authoritative: bool,
-    /// Integration action declarations this thread was already sent,
-    /// restored by the tinyagents session on resume. Rebuilt into deferred
-    /// executors whenever the live integrations list does not supply them
-    /// (see `recorded_tools`).
+    /// A cold hydration seeded the announced sets; later ones diff instead.
+    integration_announcements_seeded: bool,
+    /// Integration action declarations this thread was already sent, restored by
+    /// the tinyagents session on resume. Rebuilt into deferred executors whenever
+    /// the live integrations list does not supply them (see `recorded_tools`).
     recorded_integration_actions: Vec<tinytools::ToolSpec>,
     workflows: Vec<crate::skills::Workflow>,
     composio_events: Option<tinybus::events::EventReceiver<crate::core::events::DomainEvent>>,
@@ -613,8 +617,12 @@ impl OpenHumanTurnPrelude {
         );
         run_context.dispatch = Some(Arc::new(
             crate::agent::tinyagents::host::TurnDispatchState::new(
-                crate::agent::tinyagents::agent_turn_wall_clock_ms()
-                    .map(std::time::Duration::from_millis),
+                crate::agent::tinyagents::agent_turn_wall_clock_ms_for(
+                    self.runtime_config
+                        .as_deref()
+                        .is_some_and(crate::agent::tinyagents::chat_provider_is_local),
+                )
+                .map(std::time::Duration::from_millis),
             ),
         ));
         run_context.sandbox_mode = Some(self.sandbox_mode);
@@ -761,70 +769,9 @@ pub(super) fn reconcile_synthesized_visibility(
     }
 }
 
-/// Account only a receipt-backed turn, using the same direct-plus-completed
-/// child total the codec attached to the atomic transcript append.
-pub(super) async fn account_committed_turn_against_goal(
-    workspace_dir: &std::path::Path,
-    thread_id: Option<&str>,
-    sidecar: &crate::agent::tinyagents::host::run_context::SessionTurnSidecar,
-) {
-    let child_input = sidecar
-        .subagents
-        .iter()
-        .map(|entry| entry.usage.input_tokens)
-        .sum::<u64>();
-    let child_output = sidecar
-        .subagents
-        .iter()
-        .map(|entry| entry.usage.output_tokens)
-        .sum::<u64>();
-    crate::agent::goals::runtime::account_turn_against_goal(
-        workspace_dir,
-        thread_id,
-        sidecar.input_tokens.saturating_add(child_input),
-        sidecar.output_tokens.saturating_add(child_output),
-        sidecar
-            .duration
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default(),
-    )
-    .await;
-}
-
-/// UI billing projection for a committed turn. It keeps child records for a
-/// detailed display while reporting the same all-in totals the codec persists.
-pub(super) fn holistic_last_turn_usage(
-    sidecar: &crate::agent::tinyagents::host::run_context::SessionTurnSidecar,
-) -> crate::agent::tinyagents::host::LastTurnUsage {
-    // Each count is the turn's own plus every synchronous child's.
-    let tokens = |own: u64, child: fn(&crate::agent::subagent_host::SubagentUsage) -> u64| {
-        sidecar.subagents.iter().fold(own, |total, entry| {
-            total.saturating_add(child(&entry.usage))
-        })
-    };
-    let input_tokens = tokens(sidecar.input_tokens, |usage| usage.input_tokens);
-    let output_tokens = tokens(sidecar.output_tokens, |usage| usage.output_tokens);
-    let cached_input_tokens = tokens(sidecar.cached_input_tokens, |usage| {
-        usage.cached_input_tokens
-    });
-    let cost_usd = sidecar
-        .subagents
-        .iter()
-        .fold(sidecar.cost_usd, |total, entry| {
-            total + entry.usage.charged_amount_usd
-        });
-    crate::agent::tinyagents::host::LastTurnUsage {
-        input_tokens,
-        output_tokens,
-        cached_input_tokens,
-        cost_usd,
-        context_window: sidecar.context_window,
-        subagents: sidecar.subagents.clone(),
-        // The session does not count these; a library turn that asked for a
-        // final-response report fills them in (`response_shape`).
-        reasoning_tokens: 0,
-    }
-}
+#[path = "runtime_session_usage.rs"]
+mod usage;
+pub(super) use usage::{account_committed_turn_against_goal, holistic_last_turn_usage};
 
 impl OpenHumanSessionHost {
     pub(super) fn update_runtime_prelude_progress(
@@ -1043,9 +990,9 @@ impl OpenHumanSessionHost {
                     pending_skill_retraction: self.pending_skill_retraction.clone(),
                     connected_integrations: self.connected_integrations.clone(),
                     connected_integrations_initialized: self.connected_integrations_initialized,
-                    // Builder-provided integrations have not been verified by
-                    // this session's current authorization refresh.
+                    // Builder-provided integrations are not yet verified this session.
                     connected_integrations_authoritative: false,
+                    integration_announcements_seeded: false,
                     recorded_integration_actions: Vec::new(),
                     workflows: self.workflows.clone(),
                     composio_events: None,
@@ -1097,6 +1044,14 @@ impl OpenHumanSessionHost {
                                 "OpenHumanTurnPrelude",
                             )
                         })?;
+                        // The previous turn's goal accounting was deferred past
+                        // its completion; settle it before this turn reads the goal.
+                        let pending_post_commit = state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .pending_post_commit
+                            .take();
+                        post_commit::await_pending(pending_post_commit).await;
                         let new_session = !view.resumed && view.history.is_empty();
                         prelude
                             .refresh_turn_boundary(new_session)
@@ -1227,88 +1182,17 @@ impl OpenHumanSessionHost {
                     let agent_id = agent_id.clone();
                     let channel = channel.clone();
                     Box::pin(async move {
-                        let iterations = receipt
-                            .outcome
-                            .history
-                            .iter()
-                            .filter(|message| matches!(message, Message::Assistant(_)))
-                            .count()
-                            .max(1) as u32;
-                        let output = receipt.outcome.output.clone().unwrap_or_default();
-                        // Skips compaction checkpoints (user-role, not the user's words).
-                        let input =
-                            crate::agent::tinyagents::last_user_message(&receipt.outcome.history)
-                                .map(user_text_with_markers)
-                                .unwrap_or_default();
-                        let sidecar = receipt
-                            .options
-                            .context
-                            .session_sidecar
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone();
-                        let usage = holistic_last_turn_usage(&sidecar);
-                        let interrupted = sidecar.hit_cap || receipt.outcome.interrupted;
-                        let tool_calls = sidecar
-                            .tool_outcomes
-                            .iter()
-                            .map(|outcome| crate::agent::hooks::ToolCallRecord {
-                                name: outcome.name.clone(),
-                                arguments: outcome.arguments.clone(),
-                                success: outcome.success,
-                                output_summary: crate::agent::hooks::sanitize_tool_output(
-                                    &outcome.content,
-                                    &outcome.name,
-                                    outcome.success,
-                                ),
-                                duration_ms: outcome.duration_ms,
-                            })
-                            .collect::<Vec<_>>();
-                        let turn_duration_ms = sidecar
-                            .duration
-                            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-                            .unwrap_or_default();
-                        let prelude = state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .prelude
-                            .clone();
-                        if let Some(prelude) = prelude {
-                            prelude.finalize_after_durable_commit(&receipt).await;
-                            account_committed_turn_against_goal(
-                                &prelude.workspace_dir,
-                                receipt.options.context.thread_id.as_deref(),
-                                &sidecar,
-                            )
-                            .await;
-                        }
-                        let _ =
-                            progress::send_receipt_progress(&receipt, &input, &output, iterations)
-                                .await;
-                        // Never retain the receipt: its run context holds the
-                        // turn's progress sender, which would keep the caller's
-                        // bridge alive after `set_on_progress(None)`.
-                        drop(receipt);
-                        {
-                            let mut state = state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            state.last_turn_hit_cap = interrupted;
-                            state.last_turn_usage = Some(usage);
-                        }
-                        crate::agent::hooks::fire_hooks(
+                        post_commit::finalize_committed_turn(
+                            &state,
                             &post_turn_hooks,
-                            crate::agent::hooks::TurnContext {
-                                user_message: input,
-                                assistant_response: output,
-                                tool_calls,
-                                turn_duration_ms,
-                                session_id: Some(session_id.clone()),
-                                agent_id: Some(agent_id.clone()),
-                                entrypoint: Some(channel.clone()),
-                                iteration_count: iterations as usize,
+                            post_commit::TurnIdentity {
+                                session_id,
+                                agent_id,
+                                channel,
                             },
-                        );
+                            receipt,
+                        )
+                        .await;
                         Ok(())
                     })
                 }
@@ -1337,7 +1221,9 @@ impl OpenHumanSessionHost {
         let mut builder = SessionBuilder::new(driver)
             .codec(Arc::new(OpenHumanTranscriptCodec))
             .hooks(hooks)
-            .retain_recorded_tools(true);
+            .retain_recorded_tools(
+                !self.host_only && crate::agent::tool_snapshot_scope::retain_recorded_tools(),
+            );
         if let Some(session) = self.session.clone() {
             builder = builder.session(session_locator, session, self.runtime_transcript_meta());
         }
@@ -1396,63 +1282,6 @@ impl OpenHumanSessionHost {
             event_channel: self.event_channel.clone(),
             agent_definition_name: self.agent_definition_name.clone(),
         });
-    }
-
-    fn runtime_transcript_stem(&self) -> String {
-        match &self.session_parent_prefix {
-            Some(prefix) => format!("{prefix}__{}", self.session_key),
-            None => self.session_key.clone(),
-        }
-    }
-
-    pub(in crate::agent::session_host) fn session_locator(
-        &self,
-    ) -> Arc<dyn tinyagents_session::transcript::TranscriptLocator> {
-        if let Some(injected) = self.session_history_locator.clone() {
-            return injected;
-        }
-        self.session_history_locator_memo
-            .get_or_init(|| {
-                let session_agent_id =
-                    crate::agent::session_store::current_agent_key_or(&self.agent_definition_id);
-                transcripts_or_files(&session_agent_id, &self.workspace_dir)
-            })
-            .clone()
-    }
-
-    fn runtime_transcript_meta(&self) -> TranscriptMeta {
-        let now = chrono::Utc::now().to_rfc3339();
-        TranscriptMeta {
-            agent_name: self.agent_definition_name.clone(),
-            agent_id: Some(self.agent_definition_id.clone()),
-            agent_type: Some(if self.session_parent_prefix.is_some() {
-                "subagent".into()
-            } else {
-                "root".into()
-            }),
-            dispatcher: if self.tool_dispatcher.should_send_tool_specs() {
-                "native".into()
-            } else {
-                "xml".into()
-            },
-            provider: None,
-            model: Some(self.model_name.clone()),
-            created: now.clone(),
-            updated: now,
-            turn_count: 0,
-            prefix_message_count: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            charged_amount_usd: 0.0,
-            thread_id: self.thread_id.clone(),
-            task_id: None,
-            session_id: self.session.as_ref().map(|session| session.session_id()),
-            parent_session_id: self
-                .session
-                .as_ref()
-                .and_then(|session| session.parent_session_id()),
-        }
     }
 }
 

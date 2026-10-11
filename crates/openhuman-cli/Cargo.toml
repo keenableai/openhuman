@@ -117,6 +117,16 @@ name = "storage_scope_e2e"
 path = "../../tests/storage_scope_e2e.rs"
 
 [[test]]
+# Its own binary: two agents on one backend keep cron jobs and flows apart.
+name = "storage_agent_scopes_e2e"
+path = "../../tests/storage_agent_scopes_e2e.rs"
+
+[[test]]
+# Its own binary: the delegation graph's checkpointer on every driver.
+name = "storage_delegation_e2e"
+path = "../../tests/storage_delegation_e2e.rs"
+
+[[test]]
 name = "embedded_server_shutdown_e2e"
 path = "../../tests/embedded_server_shutdown_e2e.rs"
 
@@ -192,8 +202,19 @@ name = "cli_storage_url_e2e"
 path = "../../tests/cli_storage_url_e2e.rs"
 
 [[test]]
+# Boots `openhuman-core serve` on a workspace with legacy approval rows.
+name = "storage_default_import_e2e"
+path = "../../tests/storage_default_import_e2e.rs"
+# Without the SQLite driver the stores keep the legacy tables.
+required-features = ["storage-sqlite"]
+
+[[test]]
 name = "saas_mode_e2e"
 path = "../../tests/saas_mode_e2e.rs"
+
+[[test]]
+name = "saas_profile_isolation_e2e"
+path = "../../tests/saas_profile_isolation_e2e.rs"
 
 [[test]]
 name = "composio_list_tools_stack_overflow_regression"
@@ -252,13 +273,7 @@ path = "../../tests/observability_wallet_expected_e2e.rs"
 name = "skills_mcp_registry_live"
 path = "../../tests/skills_mcp_registry_live.rs"
 
-[[example]]
-name = "embed_headless"
-path = "../../examples/embed_headless.rs"
 
-[[example]]
-name = "embed_kernel"
-path = "../../examples/embed_kernel.rs"
 
 [dependencies]
 # The only openhuman crate the binary depends on. Every gate below forwards to
@@ -292,6 +307,8 @@ serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 tinyinference-llm = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
 tinytools = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools" }
+# The completion log a detached sub-agent leaves, for the SaaS delivery-recovery e2e.
+tinyagents-tasks = { path = "../../vendor/tinyagents/crates/tinyagents-tasks" }
 toml = "1.0"
 tracing = "0.1"
 # The TinyComputer contract, for the live computer-use e2e (`computer_bali_live_e2e`).
@@ -308,6 +325,7 @@ parking_lot = "0.12"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 tar = "0.4"
+tinyagents-graph = { path = "../../vendor/tinyagents/crates/tinyagents-graph", features = ["sqlite", "storage-drivers"] }
 tinyagents-harness = { path = "../../vendor/tinyagents/crates/tinyagents-harness", features = ["sqlite", "multimodal"] }
 tinyagents-session = { path = "../../vendor/tinyagents/crates/tinyagents-session" }
 tinybus = { path = "../../vendor/tinybus/crates/tinybus", default-features = false, features = ["macros", "uds"] }
@@ -329,6 +347,7 @@ urlencoding = "2.1"
 wiremock = "0.6"
 
 [features]
+langfuse = ["openhuman-rpc/langfuse"]
 # The contributor set: the core's `[features] default` gates (listed, because
 # `openhuman-rpc`'s own default carries only its server and client) plus the
 # Jev ranker. The product lanes pass `--features
@@ -345,6 +364,7 @@ default = [
     "modules",
     "jev",
     "tinymemes",
+    "storage-sqlite",
 ]
 # Every gate forwards to `openhuman-rpc` alone (chain: rpc -> tinyhumans ->
 # embed -> core); `scripts/ci/check-feature-forwarding.mjs` checks the link.
@@ -362,7 +382,6 @@ web3 = ["openhuman-rpc/web3"]
 storage-sqlite = ["openhuman-rpc/storage-sqlite"]
 storage-mongodb = ["openhuman-rpc/storage-mongodb"]
 storage-file = ["openhuman-rpc/storage-file"]
-runtime-node = ["openhuman-rpc/runtime-node"]
 media = ["openhuman-rpc/media"]
 flows = ["openhuman-rpc/flows"]
 skills = ["openhuman-rpc/skills"]
@@ -380,3 +399,7 @@ bin-tools = ["dep:clap"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
+[[test]]
+name = "embeddings_opt_out"
+path = "../../tests/embeddings_opt_out.rs"

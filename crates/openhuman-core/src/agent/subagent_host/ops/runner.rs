@@ -95,29 +95,9 @@ pub(super) fn tier_gate_decision(
     Ok(())
 }
 
-/// Truncate `output` in place to the definition's `max_result_chars` cap (when
-/// set), appending a `[...truncated]` marker. Char-count based (not byte-length)
-/// to avoid panicking on a multi-byte UTF-8 sequence at the boundary.
-fn apply_max_result_chars(output: &mut String, cap: Option<usize>, agent_id: &str) {
-    let Some(cap) = cap else { return };
-    let original_chars = output.chars().count();
-    if original_chars <= cap {
-        return;
-    }
-    tracing::debug!(
-        agent_id = %agent_id,
-        original_chars,
-        cap,
-        "[subagent_host] truncating oversized result to max_result_chars cap"
-    );
-    let byte_offset = output
-        .char_indices()
-        .nth(cap)
-        .map(|(i, _)| i)
-        .unwrap_or(output.len());
-    output.truncate(byte_offset);
-    output.push_str("\n[...truncated]");
-}
+#[path = "runner_result_cap.rs"]
+mod result_cap;
+use result_cap::apply_max_result_chars;
 
 /// Run a sub-agent based on its definition and a task prompt.
 ///
@@ -259,7 +239,7 @@ pub(crate) async fn run_subagent_direct(
         // This surfaces `SpawnDepthExceeded` before a provider round-trip and
         // across the MCP process hop; the crate's `TinyAgentsError::SubAgentDepth`
         // maps onto this same error shape for over-deep in-process runs.
-        if attempted_depth > MAX_SPAWN_DEPTH {
+        if attempted_depth > crate::agent::tinyagents::budget::depth(&options.run_context) {
             tracing::warn!(
                 agent_id = %definition.id,
                 task_id = %task_id,
@@ -269,7 +249,7 @@ pub(crate) async fn run_subagent_direct(
             );
             return Err(SubagentRunError::SpawnDepthExceeded {
                 attempted_depth,
-                max_depth: MAX_SPAWN_DEPTH,
+                max_depth: crate::agent::tinyagents::budget::depth(&options.run_context),
             });
         }
 
@@ -1044,7 +1024,12 @@ async fn run_typed_mode(
                         input_tokens,
                         output_tokens,
                         cached_input_tokens,
-                        charged_amount_usd,
+                        // A custom turn graph reports its own spend; it is
+                        // taken as that graph's charge, never re-estimated.
+                        cost: crate::agent::cost::CostTally {
+                            known_usd: charged_amount_usd,
+                            source: crate::agent::cost::CostSource::Charged,
+                        },
                     },
                     res.early_exit_tool,
                     res.hit_cap,
@@ -1090,7 +1075,7 @@ async fn run_typed_mode(
         // result + blocker instead of treating the summary as a finished answer
         // or re-spinning the identical delegation (#4096).
         crate::agent::subagent_host::types::SubagentRunStatus::Incomplete {
-            reason: "reached its tool-call limit before finishing".into(),
+            reason: crate::agent::turn_stop::SUBAGENT_ITERATION_CAP_REASON.into(),
         }
     } else {
         // A clean final response. (An `ask_user_clarification` early-exit is
@@ -1106,7 +1091,8 @@ async fn run_typed_mode(
         input_tokens: agg_usage.input_tokens,
         output_tokens: agg_usage.output_tokens,
         cached_input_tokens: agg_usage.cached_input_tokens,
-        charged_amount_usd: agg_usage.charged_amount_usd,
+        charged_amount_usd: agg_usage.cost.known_usd,
+        cost_source: agg_usage.cost.source,
     };
     // A nested child records on this run's isolated ledger. Fold those totals
     // into the completed child before writing the immediate parent's ledger so
@@ -1121,6 +1107,7 @@ async fn run_typed_mode(
             .cached_input_tokens
             .saturating_add(entry.usage.cached_input_tokens);
         usage.charged_amount_usd += entry.usage.charged_amount_usd;
+        usage.cost_source = usage.cost_source.max(entry.usage.cost_source);
     }
     Ok(SubagentRunOutcome {
         task_id: task_id.to_string(),

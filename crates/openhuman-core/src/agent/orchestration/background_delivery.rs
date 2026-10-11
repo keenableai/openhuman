@@ -43,8 +43,13 @@ use tinybus::EventHandler;
 use tinybus::SubscriptionHandle;
 
 use super::background_completions;
+use super::busy_guard::is_busy;
+#[cfg(test)]
+use super::busy_guard::{busy, clear_busy_for_thread, TurnBusy};
 use super::completion_notice::build_undelivered_notice;
 use super::completion_owners;
+use super::delivery_drain::{run_drain, DrainFence, DrainOutcome, RECOVERY_BUSY_POLL};
+use crate::core::runtime::tenant;
 use crate::core::runtime::CoreContext;
 
 /// Coalesce completions landing within this window into one delivery turn.
@@ -54,46 +59,11 @@ const DEBOUNCE: Duration = Duration::from_secs(3);
 /// delivery turn, so providers and the session store are up first.
 const RECOVERY_DELAY: Duration = Duration::from_secs(15);
 
-/// Sessions with a user turn currently in flight — delivery defers while busy.
-fn busy() -> &'static Mutex<HashSet<String>> {
-    static BUSY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    BUSY.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 /// Threads whose delivery turn is in flight — prevents two concurrent turns.
+/// Keyed by [`tenant::profile_key`] of the thread id, for the same reason.
 fn delivering() -> &'static Mutex<HashSet<String>> {
     static D: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     D.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Is any in-flight turn running on `thread_id`?
-fn is_busy(thread_id: &str) -> bool {
-    busy()
-        .lock()
-        .expect("background_delivery busy poisoned")
-        .iter()
-        .any(|session| {
-            background_completions::thread_for_session(session).as_deref() == Some(thread_id)
-        })
-}
-
-/// Forget every in-flight turn on `thread_id`. A turn that is cancelled
-/// cooperatively (Stop) can end without `AgentTurnCompleted` or `AgentError`, and
-/// its session would otherwise stay "busy" and defer this thread's deliveries
-/// until restart. Returns how many sessions were cleared.
-pub(crate) fn clear_busy_for_thread(thread_id: &str) -> usize {
-    let mut busy = busy().lock().expect("background_delivery busy poisoned");
-    let before = busy.len();
-    busy.retain(|session| {
-        background_completions::thread_for_session(session).as_deref() != Some(thread_id)
-    });
-    let cleared = before - busy.len();
-    if cleared > 0 {
-        log::debug!(
-            "[background_delivery] cleared {cleared} stale busy session(s) thread_id={thread_id}"
-        );
-    }
-    cleared
 }
 
 /// Ask for a delivery attempt on `thread_id` soon (after a Stop cleared a stale
@@ -111,21 +81,7 @@ impl EventHandler<DomainEvent> for BackgroundDeliveryHandler {
     }
 
     async fn handle(&self, event: &DomainEvent) {
-        match event {
-            DomainEvent::AgentTurnStarted { session_id, .. } => {
-                busy()
-                    .lock()
-                    .expect("busy poisoned")
-                    .insert(session_id.clone());
-            }
-            // A failed turn may not emit AgentTurnCompleted — clear busy so
-            // delivery isn't stuck.
-            DomainEvent::AgentTurnCompleted { session_id, .. }
-            | DomainEvent::AgentError { session_id, .. } => {
-                busy().lock().expect("busy poisoned").remove(session_id);
-            }
-            _ => {}
-        }
+        // Busy state is not tracked here (off-task, no tenant): see `TurnBusy`.
         let saas = crate::core::runtime::is_saas();
         // Opening a profile is async (it may take its lease), so resolve the
         // owning profiles' contexts first and hand the sync scheduler a lookup.
@@ -200,7 +156,7 @@ fn drain_target(event: &DomainEvent) -> Option<(&String, Option<&String>, Durati
             task_id,
             ..
         } => Some((parent_session, Some(task_id), DEBOUNCE)),
-        _ => return None,
+        _ => None,
     }
 }
 
@@ -277,8 +233,16 @@ pub(super) fn drain_schedule_in(
         .collect()
 }
 
-/// Schedule a debounced delivery attempt for a thread.
+/// Schedule a debounced delivery attempt for a thread, fenced by the calling
+/// profile's lease ([`DrainFence::current`]).
 fn schedule_delivery(thread_id: String, delay: Duration) {
+    schedule_delivery_inner(thread_id, delay, false, DrainFence::current());
+}
+
+/// `wait_idle`: after the delay, keep waiting while the thread's user turn is in
+/// flight instead of giving up (see [`run_drain`]). `fence` drops the drain
+/// once this node loses the owning profile's lease.
+fn schedule_delivery_inner(thread_id: String, delay: Duration, wait_idle: bool, fence: DrainFence) {
     #[cfg(test)]
     scheduled_for_test()
         .lock()
@@ -287,8 +251,26 @@ fn schedule_delivery(thread_id: String, delay: Duration) {
     // Scoped: the thread -> workspace table is keyed per profile, so the
     // delayed task must run under the profile that scheduled it.
     crate::core::runtime::spawn_scoped(async move {
-        tokio::time::sleep(delay).await;
-        try_deliver(thread_id).await;
+        let turn_fence = fence.clone();
+        let turn_thread = thread_id.clone();
+        let outcome = run_drain(
+            &thread_id,
+            delay,
+            wait_idle,
+            &fence,
+            RECOVERY_BUSY_POLL,
+            || try_deliver(turn_thread, turn_fence),
+        )
+        .await;
+        if outcome == DrainOutcome::StillBusy {
+            // Still running past the ceiling: leave the record pending and
+            // wait again rather than overlap the user's turn.
+            log::debug!(
+                "[background_delivery] recovered drain still busy; waiting again \
+                 thread_id={thread_id}"
+            );
+            schedule_delivery_inner(thread_id, RECOVERY_BUSY_POLL, true, fence);
+        }
     });
 }
 
@@ -302,9 +284,14 @@ fn scheduled_for_test() -> &'static Mutex<Vec<(String, Duration)>> {
 
 /// Boot recovery: redeliver completions a previous process finished but never
 /// delivered. Each thread holding undelivered results gets one delivery attempt
-/// after [`RECOVERY_DELAY`], through the normal idle-gated path. Returns the
-/// number of threads scheduled.
+/// after [`RECOVERY_DELAY`], through the normal idle-gated path, fenced by the
+/// calling profile's lease when there is one. Returns the number of threads
+/// scheduled.
 pub(crate) fn recover_on_boot(workspace_dir: &Path) -> usize {
+    recover_fenced(workspace_dir, DrainFence::current())
+}
+
+fn recover_fenced(workspace_dir: &Path, fence: DrainFence) -> usize {
     // Scheduling needs a runtime; check before claiming so a later call retries.
     if tokio::runtime::Handle::try_current().is_err() {
         log::warn!(
@@ -323,9 +310,27 @@ pub(crate) fn recover_on_boot(workspace_dir: &Path) -> usize {
             "[background_delivery] scheduling redelivery of undelivered completions after restart \
              thread_id={thread_id}"
         );
-        schedule_delivery(thread_id.clone(), RECOVERY_DELAY);
+        schedule_delivery_inner(thread_id.clone(), RECOVERY_DELAY, true, fence.clone());
     }
     threads.len()
+}
+
+/// Recovery for a profile that was just opened: forget the workspace's earlier
+/// claim (a profile released and re-leased may have results another node left
+/// pending since), then recover. Duplicate drains are harmless: delivery is
+/// lease-claimed. `fence` is the grant the profile was just opened under (the
+/// host has not published the profile yet, so it cannot be looked up): a drain
+/// that comes due after this node lost that lease is dropped, and the records
+/// stay pending for the node that holds it now.
+pub(crate) fn recover_on_open(workspace_dir: &Path, fence: DrainFence) -> usize {
+    background_completions::forget_recovery(workspace_dir);
+    let scheduled = recover_fenced(workspace_dir, fence);
+    if scheduled == 0 {
+        // Nothing pending: do not keep this profile's log handle cached for a
+        // workspace that may never complete anything on this node.
+        background_completions::forget_recovery(workspace_dir);
+    }
+    scheduled
 }
 
 /// Claim everything ready for a thread **right now** (sync, testable): `None`
@@ -348,7 +353,13 @@ fn claim_ready(router: &CompletionRouter, thread_id: &str) -> Option<Vec<Complet
 
 /// Drain + deliver pending completions for a thread — if idle and not already
 /// delivering. Batches everything ready at this instant into one system turn.
-async fn try_deliver(thread_id: String) {
+async fn try_deliver(thread_id: String, fence: DrainFence) {
+    if !fence.admits() {
+        log::info!(
+            "[background_delivery] profile lease lost; not delivering thread_id={thread_id}"
+        );
+        return;
+    }
     let Some(workspace_dir) = background_completions::workspace_for_thread(&thread_id) else {
         log::debug!("[background_delivery] no workspace for thread_id={thread_id}");
         return;
@@ -378,8 +389,28 @@ async fn try_deliver(thread_id: String) {
              delay_ms={}",
             delay.as_millis()
         );
-        schedule_delivery(thread_id, delay);
+        schedule_delivery_inner(thread_id, delay, false, fence);
     }
+}
+
+/// One pass of the delivery loop whose turn only counts itself, for tests
+/// outside this module.
+#[cfg(test)]
+pub(super) async fn try_deliver_for_test(
+    thread_id: String,
+    router: Arc<CompletionRouter>,
+    turns: Arc<std::sync::atomic::AtomicU32>,
+) -> Option<Duration> {
+    try_deliver_with(
+        thread_id,
+        router,
+        move |_, _| {
+            turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Ok(String::new()) }
+        },
+        |_, _| async {},
+    )
+    .await
 }
 
 /// Backoff before retrying a delivery whose record has now failed `attempts` times.
@@ -547,11 +578,12 @@ where
     retry_after
 }
 
-/// The per-thread delivery slot, plus the lease on the batch being delivered.
+/// The per-thread (per profile) delivery slot, plus the batch lease.
 /// Dropping it frees both: `release` on an already-settled record is a no-op,
 /// so a settled batch is untouched and an abandoned one is claimable again.
 struct DeliverySlot {
-    thread_id: String,
+    /// [`tenant::profile_key`] of the thread id.
+    key: String,
     router: Arc<CompletionRouter>,
     held: Vec<String>,
 }
@@ -559,12 +591,13 @@ struct DeliverySlot {
 impl DeliverySlot {
     /// `None` when a delivery is already in flight for the thread.
     fn claim(thread_id: &str, router: Arc<CompletionRouter>) -> Option<Self> {
+        let key = tenant::profile_key(thread_id);
         let mut d = delivering().lock().expect("delivering poisoned");
-        if !d.insert(thread_id.to_string()) {
+        if !d.insert(key.clone()) {
             return None;
         }
         Some(Self {
-            thread_id: thread_id.to_string(),
+            key,
             router,
             held: Vec::new(),
         })
@@ -581,7 +614,7 @@ impl Drop for DeliverySlot {
             self.router.release(&self.held);
         }
         if let Ok(mut d) = delivering().lock() {
-            d.remove(&self.thread_id);
+            d.remove(&self.key);
         }
     }
 }
@@ -706,3 +739,7 @@ pub(crate) fn register_background_delivery() {
 #[cfg(test)]
 #[path = "background_delivery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "background_delivery_slots_tests.rs"]
+mod slots_tests;

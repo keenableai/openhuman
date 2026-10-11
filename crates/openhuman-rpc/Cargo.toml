@@ -11,6 +11,7 @@ publish = false
 # to embed and then the core (chain: core -> embed -> tinyhumans -> rpc ->
 # hosts). `http-client`, `server` and `session-store` are this crate's own.
 [features]
+langfuse = ["openhuman-tinyhumans/langfuse"]
 default = ["http-client", "server"]
 # Authenticated HTTP client for reaching a core's `/rpc` endpoint.
 http-client = ["dep:reqwest"]
@@ -58,7 +59,6 @@ web3 = ["openhuman-tinyhumans/web3"]
 storage-sqlite = ["openhuman-tinyhumans/storage-sqlite"]
 storage-mongodb = ["openhuman-tinyhumans/storage-mongodb"]
 storage-file = ["openhuman-tinyhumans/storage-file"]
-runtime-node = ["openhuman-tinyhumans/runtime-node"]
 media = ["openhuman-tinyhumans/media"]
 flows = ["openhuman-tinyhumans/flows"]
 skills = ["openhuman-tinyhumans/skills"]

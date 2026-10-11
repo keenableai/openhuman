@@ -377,36 +377,9 @@ impl OpenHumanSecurityGate {
     }
 }
 
-/// Maps how the approval flow settled to what the runtime is told.
-///
-/// A refusal is a `Deny` whose text names no human and no timeout — every
-/// refusal reads the same — and rules out other routes explicitly, because
-/// `shell` never prompts while autonomy is disabled (`[autonomy] enabled =
-/// false`, the default) and was used to redo a refused call.
-///
-/// The text carries no `[policy-denied]` marker on purpose. The marker
-/// classifies as a policy failure with a zero recovery budget
-/// (`middleware::repeated_failure`), which pauses the turn before the model can
-/// answer. The model must get this turn to tell the user the action was not
-/// done, as it did with the harness's unmarked fallback text.
-fn decision_for_outcome(tool_name: &str, outcome: GateOutcome) -> GateDecision {
-    match outcome {
-        GateOutcome::Allow => GateDecision::Prompted { approved: true },
-        GateOutcome::Deny { reason } => {
-            tracing::warn!(
-                target: "tinyagents",
-                tool = %tool_name,
-                reason = %reason,
-                "[tinyagents::host::security] approval flow declined the tool call"
-            );
-            GateDecision::deny(
-                "This action was refused and must not be performed this turn — do not retry this \
-                 call and do not achieve the same result another way (shell, CLI, another tool). \
-                 Tell the user it was not done.",
-            )
-        }
-    }
-}
+#[path = "security_gate_approval.rs"]
+mod approval;
+use approval::decision_for_outcome;
 
 #[async_trait]
 impl SecurityGate for OpenHumanSecurityGate {
@@ -544,6 +517,29 @@ impl SecurityGate for OpenHumanSecurityGate {
                 call.tool_name
             )));
         };
+
+        // A scheduled prompt is data, not an open-ended approval for later
+        // actions. Keep cron agent turns within a read-only tool capability.
+        // This check precedes the shell shortcut and all approval settings,
+        // including installations where the approval gate is disabled.
+        if matches!(
+            crate::agent::turn_origin::current(),
+            Some(
+                crate::agent::turn_origin::AgentTurnOrigin::TrustedAutomation {
+                    source: crate::agent::turn_origin::TrustedAutomationSource::Cron,
+                    ..
+                }
+            )
+        ) && (call.tool_name == SHELL_TOOL
+            || tool.permission_level_with_args(&call.arguments) > PermissionLevel::ReadOnly
+            || tool.external_effect_with_args(&call.arguments))
+        {
+            return Ok(GateDecision::deny(format!(
+                "{} Scheduled agent turns may use read-only tools only; '{}' needs a live user action.",
+                crate::security::POLICY_DENIED_MARKER,
+                call.tool_name
+            )));
+        }
 
         // 3. `shell` is the one tool whose arguments carry a classifiable
         //    command, and `gate_decision` already encodes the autonomy tier —

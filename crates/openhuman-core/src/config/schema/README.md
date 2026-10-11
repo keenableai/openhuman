@@ -34,15 +34,12 @@ is mounted as a submodule of [`load/dirs.rs`](./load/dirs.rs) via `#[path]`.
 | `[learning]` | `learning.rs` | `LearningConfig`, `ReflectionSource` |
 | `[local_ai]` | [`local_ai.rs`](./local_ai.rs) | `LocalAiConfig`, `LocalAiUsage` |
 | `[modules]` | [`modules.rs`](./modules.rs) | `ModulesConfig`, `ModuleOverride`: controls only whether compiled-in modules load. The loadable *set* is fixed by `crate::modules::registry` |
-| `[node]` | [`node.rs`](./node.rs) | `NodeConfig` (managed Node.js toolchain for skills) |
 | `[observability]` | [`observability.rs`](./observability.rs) | `ObservabilityConfig`, `AgentTracingConfig` |
 | `[privacy]` | [`privacy.rs`](./privacy.rs) | `PrivacyConfig`, `PrivacyMode` |
 | `[proxy]` | [`proxy.rs`](./proxy.rs) | `ProxyConfig`, `ProxyScope`, plus `runtime_proxy_config()` / `set_runtime_proxy_config()` process-wide accessors |
 | `[[model_routes]]`, `[[embedding_routes]]` | [`routes.rs`](./routes.rs) | `ModelRouteConfig`, `EmbeddingRouteConfig` |
 | `[runtime]` (+ `[runtime.docker]`), `[shell]`, `[reliability]`, `[scheduler]` | [`runtime.rs`](./runtime.rs) | `RuntimeConfig`, `DockerRuntimeConfig`, `ShellConfig`, `ReliabilityConfig`, `SchedulerConfig` |
-| `[runtime_pool]` | [`runtime_pool.rs`](./runtime_pool.rs) | `RuntimePoolConfig`, `RuntimePoolLangConfig` |
 | `[runtime.local_jail]` | [`runtime_local_jail.rs`](./runtime_local_jail.rs) | `LocalJailConfig`: filesystem grants for the local OS jail |
-| `[runtime_python]` | [`runtime_python.rs`](./runtime_python.rs) | `RuntimePythonConfig` |
 | `[scheduler_gate]` | [`scheduler_gate.rs`](./scheduler_gate.rs) | `SchedulerGateConfig`, `SchedulerGateMode` |
 | `[memory]` (engine, `engines.<id>`, `conversations`, `context`, `sources`, embedding settings) | [`memory.rs`](./memory.rs) | `MemoryConfig`, `MemoryEngineSettings`, `MemoryConversationsConfig`, `MemoryContextConfig`, `MemorySourceConfig` (see [`docs/specs/memory-v2.md`](../../../../../docs/specs/memory-v2.md)) |
 | `[task_sources]` | [`task_sources.rs`](./task_sources.rs) | `TaskSourcesConfig` |
@@ -195,3 +192,7 @@ Per-section `*_tests.rs` files, plus [`load_tests.rs`](./load_tests.rs) (split i
   `action_dir` / `workspace_dir` boundary this module only describes.
 - [Settings](../../../../../gitbooks/features/settings.md)
 - [Deep architecture reference](../../../../../gitbooks/developing/architecture.md)
+
+## Config sources
+
+`load/source/` defines the `ConfigSource` port: where the TOML text of a config lives. `FileConfigSource` is `config.toml` with the atomic replace and `.bak` of `load/atomic_commit.rs` (the file stays hand-editable). `DocumentConfigSource` is the `config/{scope}` document on a shared (multi-tenant) storage backend, used by `Config::save`, snapshot reloads (`load_from_config_path`) and `load_or_init`. A process boots before its backend is installed, so its first load normally reads the file. A document that does not parse is an error (no file-style recovery, which would touch the bootstrap file). Bootstrap tables (`[storage]`) are never written to a document and are always re-applied from the file on a document read. `SaasConfig` is not part of this.

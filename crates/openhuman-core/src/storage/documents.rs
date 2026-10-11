@@ -17,7 +17,8 @@ use serde_json::Value;
 use tinystoragedrivers::{CollectionSpec, ErrorKind, Versioned};
 
 use super::{
-    block_on, current_scope, installed, DocumentStore, ScopedStorage, StorageBackend, StorageError,
+    block_on, current_scope, installed, DocumentStore, Scope, ScopedStorage, StorageBackend,
+    StorageError,
 };
 
 /// Compare-and-swap attempts before a contended update gives up.
@@ -63,6 +64,13 @@ fn mark_declared(backend: &Arc<dyn StorageBackend>, scope: &str, collection: &st
     declared.insert(key, Arc::downgrade(backend));
 }
 
+/// One-time work already done this process (a legacy import): `(backend
+/// address, scope, domain, key)`, with the same `Weak` guard as [`DECLARED`].
+type OnceKey = (usize, String, &'static str, String);
+
+static DONE_ONCE: LazyLock<Mutex<HashMap<OnceKey, Weak<dyn StorageBackend>>>> =
+    LazyLock::new(Mutex::default);
+
 /// The backend and scope a [`Repo`] was opened on, for declaring its
 /// collections once per process instead of on every call.
 #[derive(Clone)]
@@ -97,15 +105,30 @@ impl Repo {
         };
         let scope =
             current_scope().with_context(|| format!("[{domain}] resolve the storage scope"))?;
+        Self::on(&backend, &scope, domain, collections).map(Some)
+    }
+
+    /// The repo over `backend` under `scope`, declaring its collections once
+    /// per process.
+    ///
+    /// # Errors
+    ///
+    /// When the backend refuses the scope.
+    pub fn on(
+        backend: &Arc<dyn StorageBackend>,
+        scope: &Scope,
+        domain: &'static str,
+        collections: fn() -> Vec<CollectionSpec>,
+    ) -> Result<Self> {
         let scoped = backend
-            .for_scope(&scope)
+            .for_scope(scope)
             .with_context(|| format!("[{domain}] open the storage scope"))?;
         let mut repo = Self::over(&scoped, domain, collections);
         repo.origin = Some(Origin {
-            backend,
+            backend: Arc::clone(backend),
             scope: scope.as_str().to_string(),
         });
-        Ok(Some(repo))
+        Ok(repo)
     }
 
     /// The repo over an already scoped handle (tests, explicit scopes).
@@ -120,6 +143,41 @@ impl Repo {
             collections,
             origin: None,
         }
+    }
+
+    /// Runs `f` once per process for this repo's backend instance, scope and
+    /// `key` (a legacy import keyed by its source path). Calls are serialized,
+    /// and the run is recorded only when `f` succeeds, so a failed one is
+    /// retried by the next call. A replaced backend runs it afresh. A repo
+    /// opened with [`Repo::over`] has no backend identity and runs `f` on
+    /// every call, so `f` must be idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns.
+    pub fn once_per_backend(&self, key: &str, f: impl FnOnce() -> Result<()>) -> Result<()> {
+        let Some(origin) = &self.origin else {
+            return f();
+        };
+        let once_key = (
+            backend_addr(&origin.backend),
+            origin.scope.clone(),
+            self.domain,
+            key.to_string(),
+        );
+        let mut done = DONE_ONCE.lock().unwrap_or_else(PoisonError::into_inner);
+        let already = done
+            .get(&once_key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|alive| Arc::ptr_eq(&alive, &origin.backend));
+        if already {
+            return Ok(());
+        }
+        f()?;
+        done.retain(|_, weak| weak.strong_count() > 0);
+        done.insert(once_key, Arc::downgrade(&origin.backend));
+        log::debug!("[storage] {} one-time work done", self.domain);
+        Ok(())
     }
 
     /// Runs `op` against the store from synchronous code, after declaring the
