@@ -1291,6 +1291,10 @@ async fn config_save_and_load_encrypts_channel_secret_fields() {
         EnvVarGuard::unset(VITE_APP_ENV_VAR),
         EnvVarGuard::unset("OPENHUMAN_TAVILY_API_KEY"),
         EnvVarGuard::unset("TAVILY_API_KEY"),
+        EnvVarGuard::unset("OPENHUMAN_KEENABLE_API_KEY"),
+        EnvVarGuard::unset("KEENABLE_API_KEY"),
+        EnvVarGuard::unset("OPENHUMAN_TINYFISH_API_KEY"),
+        EnvVarGuard::unset("TINYFISH_API_KEY"),
         EnvVarGuard::set("OPENHUMAN_MEMORY_EMBED_STRICT", "false"),
         EnvVarGuard::set("OPENHUMAN_MEMORY_EMBED_ENDPOINT", ""),
         EnvVarGuard::set("OPENHUMAN_MEMORY_EMBED_MODEL", ""),
@@ -1317,6 +1321,7 @@ async fn config_save_and_load_encrypts_channel_secret_fields() {
     config.search.exa.api_key = Some("exa-secret".into());
     config.search.tavily.api_key = Some("tavily-secret".into());
     config.search.keenable.api_key = Some("keenable-secret".into());
+    config.search.tinyfish.api_key = Some("tinyfish-secret".into());
     config.channels_config.telegram = Some(TelegramConfig {
         bot_token: "telegram-secret".into(),
         chat_id: None,
@@ -1402,6 +1407,7 @@ async fn config_save_and_load_encrypts_channel_secret_fields() {
         "exa-secret",
         "tavily-secret",
         "keenable-secret",
+        "tinyfish-secret",
         "telegram-secret",
         "discord-secret",
         "slack-bot-secret",
@@ -1433,6 +1439,10 @@ async fn config_save_and_load_encrypts_channel_secret_fields() {
     assert_eq!(
         loaded.search.keenable.api_key.as_deref(),
         Some("keenable-secret")
+    );
+    assert_eq!(
+        loaded.search.tinyfish.api_key.as_deref(),
+        Some("tinyfish-secret")
     );
     assert_eq!(
         loaded
