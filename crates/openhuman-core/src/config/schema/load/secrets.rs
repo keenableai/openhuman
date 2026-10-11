@@ -143,6 +143,11 @@ pub(super) fn decrypt_config_secrets(config: &mut Config, openhuman_dir: &Path) 
         &mut config.search.keenable.api_key,
         "search.keenable.api_key",
     )?;
+    decrypt_optional_secret(
+        &store,
+        &mut config.search.tinyfish.api_key,
+        "search.tinyfish.api_key",
+    )?;
 
     let ch = &mut config.channels_config;
     if let Some(ref mut tg) = ch.telegram {
@@ -264,6 +269,11 @@ pub(super) fn encrypt_config_secrets(config: &mut Config) -> Result<()> {
         &store,
         &mut config.search.keenable.api_key,
         "search.keenable.api_key",
+    )?;
+    encrypt_optional_secret(
+        &store,
+        &mut config.search.tinyfish.api_key,
+        "search.tinyfish.api_key",
     )?;
 
     let ch = &mut config.channels_config;
