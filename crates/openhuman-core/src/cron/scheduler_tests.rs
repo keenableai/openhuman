@@ -1,13 +1,15 @@
 use super::*;
 use crate::agent::error::AgentError;
 use crate::config::Config;
-use crate::cron::JobType;
-use crate::cron::SessionTarget;
-use crate::cron::{self, ActiveHours, DeliveryConfig};
 use crate::security::SecurityPolicy;
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use std::sync::Arc;
 use tempfile::TempDir;
+use tinyflows_schedule::types::JobType;
+use tinyflows_schedule::types::SessionTarget;
+use {
+    crate::cron, tinyflows_schedule::types::ActiveHours, tinyflows_schedule::types::DeliveryConfig,
+};
 
 async fn test_config(tmp: &TempDir) -> Config {
     let ws = tmp.path().join("workspace");
@@ -25,9 +27,11 @@ async fn test_config(tmp: &TempDir) -> Config {
 
 fn test_job(command: &str) -> CronJob {
     CronJob {
+        claim_generation: 0,
+        policy: Default::default(),
         id: "test-job".into(),
         expression: "* * * * *".into(),
-        schedule: crate::cron::Schedule::Cron {
+        schedule: tinyflows_schedule::types::Schedule::Cron {
             expr: "* * * * *".into(),
             tz: None,
             active_hours: None,
@@ -282,6 +286,20 @@ async fn a_shell_job_runs_on_this_platform() {
     );
 }
 
+#[cfg(feature = "modules")]
+#[tokio::test]
+async fn scheduled_shell_authorization_fails_closed_when_tinybox_is_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = test_config(&tmp).await;
+    config.modules.enabled = false;
+    let security =
+        SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir, &config.action_dir);
+
+    let result = authorize_shell_command(&config, &security, "echo must-not-run").await;
+
+    assert_eq!(result, Err("Command analysis is unavailable.".to_owned()));
+}
+
 /// A pipeline keeps the shell's own exit status, not `pipefail`'s.
 ///
 /// Regression guard for a behaviour change review caught on this branch. Routing
@@ -319,7 +337,7 @@ async fn a_pipeline_reports_its_last_stage_rather_than_pipefail() {
 }
 
 #[tokio::test]
-async fn without_a_backend_an_agent_needs_its_own_job_database() {
+async fn without_a_backend_an_agent_needs_its_own_job_store_or_a_legacy_jobs_db() {
     // The lib test binary installs no storage backend into the process slot.
     if crate::storage::installed().is_some() {
         return;
@@ -331,5 +349,10 @@ async fn without_a_backend_an_agent_needs_its_own_job_database() {
     assert!(!agent_jobs_may_exist(&config));
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     std::fs::write(&db, b"").unwrap();
+    assert!(agent_jobs_may_exist(&config));
+    // The `jobs.db` tinyflows wrote counts too: the first call imports it.
+    std::fs::remove_file(&db).unwrap();
+    assert!(!agent_jobs_may_exist(&config));
+    std::fs::write(crate::cron::store::legacy_db_path(&config), b"").unwrap();
     assert!(agent_jobs_may_exist(&config));
 }

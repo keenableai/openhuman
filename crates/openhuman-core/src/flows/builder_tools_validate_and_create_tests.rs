@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn edit_workflow_rejects_a_result_that_is_structurally_invalid() {
-    use crate::flows::DraftOrigin;
+    use tinyflows_catalog::DraftOrigin;
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
     let draft = ops::flows_draft_create(
@@ -38,7 +38,7 @@ async fn edit_workflow_rejects_a_result_that_is_structurally_invalid() {
 
 #[tokio::test]
 async fn edit_workflow_rejects_an_engine_incompatible_result() {
-    use crate::flows::DraftOrigin;
+    use tinyflows_catalog::DraftOrigin;
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
     let safe_graph = json!({
@@ -99,7 +99,7 @@ async fn edit_workflow_rejects_an_engine_incompatible_result() {
 
 #[tokio::test]
 async fn edit_workflow_does_not_persist_an_incompatible_saved_child_reference() {
-    use crate::flows::DraftOrigin;
+    use tinyflows_catalog::DraftOrigin;
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
     let legacy_child = json!({
@@ -185,7 +185,7 @@ async fn edit_workflow_does_not_persist_an_incompatible_saved_child_reference() 
 
 #[tokio::test]
 async fn edit_workflow_preserves_non_engine_gate_edits_in_the_draft() {
-    use crate::flows::DraftOrigin;
+    use tinyflows_catalog::DraftOrigin;
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
     let draft = ops::flows_draft_create(
@@ -332,7 +332,7 @@ fn validate_workflow_report_not_ok_when_gate_errors_present() {
 
 #[tokio::test]
 async fn edit_workflow_edits_a_draft_and_writes_back() {
-    use crate::flows::DraftOrigin;
+    use tinyflows_catalog::DraftOrigin;
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
 
@@ -365,15 +365,14 @@ async fn edit_workflow_edits_a_draft_and_writes_back() {
     assert_eq!(reloaded.graph["nodes"].as_array().unwrap().len(), 3);
 }
 
-// T-m6: when the draft write-back itself fails (here: a genuine permission
-// denial on the drafts dir, not a mock), the response must surface the
-// failure instead of claiming "Edits live on draft {id}" — the exact
-// wording that used to ship regardless of whether the write actually landed.
-#[cfg(unix)]
+// T-m6: when the draft write-back itself fails (here: a genuine constraint of
+// the database that refuses updates to draft documents, not a mock), the
+// response must surface the failure instead of claiming "Edits live on draft
+// {id}" — the exact wording that used to ship regardless of whether the write
+// actually landed.
 #[tokio::test]
 async fn edit_workflow_surfaces_draft_write_back_failure() {
-    use crate::flows::DraftOrigin;
-    use std::os::unix::fs::PermissionsExt;
+    use tinyflows_catalog::DraftOrigin;
 
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
@@ -388,20 +387,23 @@ async fn edit_workflow_surfaces_draft_write_back_failure() {
     .unwrap()
     .value;
 
-    // Force the final `flows_draft_update` write to genuinely fail: strip
-    // write permission from the drafts dir after the draft file already
-    // exists in it (create_dir_all is a no-op; the write of the new tmp
-    // file inside it is what fails).
-    let drafts_dir = config.workspace_dir.join("flows").join("drafts");
-    std::fs::set_permissions(&drafts_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let probe = drafts_dir.join(".write_probe");
-    let write_is_blocked = std::fs::write(&probe, b"x").is_err();
-    let _ = std::fs::remove_file(&probe);
-    if !write_is_blocked {
-        // Running as root — permissions are ignored, assertion is moot.
-        std::fs::set_permissions(&drafts_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        return;
-    }
+    // Updating a draft document aborts; creating, reading and listing do not,
+    // so the draft loads and only the write-back fails.
+    let conn =
+        crate::storage::rusqlite::Connection::open(crate::flows::store::db_path(&config)).unwrap();
+    let docs_table: String = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%\\_tsd\\_docs' ESCAPE '\\'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER refuse_draft_updates BEFORE UPDATE ON {docs_table}
+         WHEN NEW.coll = 'flows_drafts'
+         BEGIN SELECT RAISE(ABORT, 'drafts are read-only'); END;"
+    ))
+    .unwrap();
 
     let tool = EditWorkflowTool::new(config.clone());
     let result = tool
@@ -411,9 +413,6 @@ async fn edit_workflow_surfaces_draft_write_back_failure() {
         }))
         .await
         .unwrap();
-
-    // Restore so the tempdir can be cleaned up.
-    std::fs::set_permissions(&drafts_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(result.is_error, "{}", result.output());
     assert!(
@@ -594,7 +593,7 @@ async fn cancel_flow_run_refuses_a_run_the_caller_does_not_own() {
         &owner_flow.id,
         json!({}),
         serde_json::Map::new(),
-        crate::flows::FlowRunTrigger::Rpc,
+        tinyflows_catalog::FlowRunTrigger::Rpc,
     )
     .await
     .unwrap();

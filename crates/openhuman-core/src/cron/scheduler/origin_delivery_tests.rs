@@ -1,9 +1,12 @@
 use super::*;
-use crate::cron::{DeliveryConfig, JobType, Schedule, SessionTarget};
 use crate::threads::store::{self as conversations, CreateConversationThread};
 use tinyagents_session::transcript::{
     read_transcript, resolve_keyed_transcript_path, session_stem, FileTranscriptLocator,
     SessionRef, TranscriptLocator, TranscriptMessage, TranscriptMeta, TranscriptTurn,
+};
+use {
+    tinyflows_schedule::types::DeliveryConfig, tinyflows_schedule::types::JobType,
+    tinyflows_schedule::types::Schedule, tinyflows_schedule::types::SessionTarget,
 };
 
 fn config(tmp: &tempfile::TempDir) -> Config {
@@ -19,6 +22,8 @@ fn config(tmp: &tempfile::TempDir) -> Config {
 
 fn job(origin: Option<JobOrigin>) -> CronJob {
     CronJob {
+        claim_generation: 0,
+        policy: Default::default(),
         id: "job-1".into(),
         expression: "*/5 * * * *".into(),
         schedule: Schedule::Every { every_ms: 300_000 },

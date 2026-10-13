@@ -6,10 +6,10 @@ use super::*;
 use crate::cron::policy::{set_policy, JobPolicy};
 use crate::cron::system_job_handlers::{register, SystemJobContext};
 use crate::cron::system_jobs::ensure_system_job;
-use crate::cron::Schedule;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
+use tinyflows_schedule::types::Schedule;
 
 fn security(config: &Config) -> Arc<SecurityPolicy> {
     Arc::new(SecurityPolicy::from_config(
@@ -33,7 +33,7 @@ fn due_system_job(config: &Config, name: &str) -> CronJob {
     crate::cron::update_job(
         config,
         &job.id,
-        crate::cron::CronJobPatch {
+        tinyflows_schedule::types::CronJobPatch {
             schedule: Some(Schedule::Every {
                 every_ms: 3_600_000,
             }),
@@ -47,13 +47,10 @@ fn due_system_job(config: &Config, name: &str) -> CronJob {
 }
 
 fn force_due(config: &Config, job_id: &str) {
-    let conn = rusqlite::Connection::open(crate::cron::policy::db_path(config)).unwrap();
-    conn.execute(
-        "UPDATE cron_jobs SET next_run = ?1 WHERE id = ?2",
-        rusqlite::params![
-            (Utc::now() - ChronoDuration::seconds(1)).to_rfc3339(),
-            job_id
-        ],
+    crate::cron::store::force_next_run_for_test(
+        config,
+        job_id,
+        Utc::now() - ChronoDuration::seconds(1),
     )
     .unwrap();
 }

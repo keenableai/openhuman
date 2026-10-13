@@ -67,7 +67,7 @@ export const HOSTED_GROUPS = [
   { group: "pester", lanes: ["pester"], maxParallel: 1, container: false },
 ];
 
-const PRODUCT = '"$(bash scripts/ci/product-features.sh)"';
+const CORE_PRODUCT = '"$(bash scripts/ci/product-features.sh --core)"';
 
 // The storage-drivers lane: the drivers it turns on, the root e2e targets that
 // run once per driver (tests/support/storage_drivers.rs), and the lib-test
@@ -90,7 +90,7 @@ const STORAGE_LIB_FILTERS = [
   "flows::",
   "security::approval::",
   "security::devices::",
-  "security::keyring::",
+  "security::secret_storage::",
   "security::credentials::",
   "desktop::notifications::",
   "integrations::task_sources::",
@@ -184,7 +184,7 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
     {
       name: "static",
       checks: [
-        { name: "rust-fmt", when: rust, run: "cargo fmt --all -- --check" },
+        { name: "rust-fmt", when: rust, run: "cargo fmt --manifest-path Cargo.toml --package openhuman --package openhuman-cli --package openhuman-embed --package openhuman-modules-linked --package openhuman-rpc --package openhuman-tinyhumans --package openhuman-tui -- --check" },
         {
           name: "rust-layout",
           when: core,
@@ -231,6 +231,22 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
           name: "crate-chain",
           when: true,
           run: "node scripts/ci/check-crate-chain.mjs",
+        },
+        {
+          name: "process-statics",
+          when: true,
+          run: "bash scripts/ci-cancel-aware.sh node scripts/ci/check-process-statics.mjs",
+        },
+        {
+          // CI runs the pinned release only; linked/source are local-dev modes.
+          name: "module-source",
+          when: true,
+          run: "node scripts/ci/check-ci-module-source.mjs",
+        },
+        {
+          name: "module-boundaries",
+          when: rust || areas.scripts,
+          run: "bash scripts/ci-cancel-aware.sh node scripts/ci/check-module-boundaries.mjs",
         },
         {
           name: "module-pins",
@@ -280,11 +296,11 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
           when: areas.frontend,
           needs: ["pnpm-install"],
           // ex63: ci-lite's `format:check` is prettier plus rust:format:check;
-          // the static lane's rust-fmt already checks the root workspace, so
+          // the static lane's rust-fmt already checks OpenHuman workspace packages, so
           // only the (non-member) Tauri crate's rustfmt check stays here.
           run: ex63
             ? `pnpm --filter openhuman-app format:check:prettier --cache --cache-strategy content --cache-location ${nodeCache}/prettier-cache` +
-              " && cargo fmt --manifest-path crates/openhuman-app/Cargo.toml --all --check"
+              " && cargo fmt --manifest-path crates/openhuman-app/Cargo.toml --package openhuman-app -- --check"
             : "pnpm --filter openhuman-app format:check",
         },
         {
@@ -358,13 +374,6 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
         {
           name: "test-modules",
           when: core,
-          env: ex63
-            ? {
-                TINYCONNECTORS_TARGET_DIR: `${scratch}/target/tinyconnectors`,
-                ...rustEnv,
-                ...sccache,
-              }
-            : {},
           run: `bash scripts/ci/self-hosted/install-test-modules.sh "${modulesDir}" ${modulesEnvFile}`,
         },
         {
@@ -400,7 +409,7 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
         {
           name: "clippy-product",
           when: core,
-          run: `cargo clippy -p openhuman --features ${PRODUCT} -- -D warnings`,
+          run: `cargo clippy -p openhuman --features ${CORE_PRODUCT} -- -D warnings`,
         },
         // No separate `cargo clippy -p openhuman` (contributor set): clippy
         // lints every workspace crate in the graph, and openhuman-embed's
@@ -458,20 +467,17 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
             " openhuman::config:: openhuman::platform::socket::event_handlers:: tools::schemas:: tools::ops::tests::",
         },
         {
-          // One core build for both feature-gated suites: `mcp` and
-          // `e2e-test-support` gate disjoint code (mcp::server::resources
-          // does not touch test_support, and vice versa), so each suite sees
-          // the same code it would under its feature alone. Separately they
-          // were two full core test builds. The introspect filter is scoped
-          // on purpose; see ci-lite.yml for the hole. The `cargo check` of
-          // the e2e-test-support set runs on pushes to main (CI Lite): this
-          // build already compiles that set, under cfg(test).
+          // Share one build for these disjoint test surfaces. Enable the
+          // module host while keeping web3 disabled, so its wallet callback
+          // gate is exercised rather than silently selecting zero tests.
+          // MCP resources do not touch test_support; introspection stays
+          // scoped to avoid tests that require the complete product.
           name: "gate-contract-tests-features",
           when: gateSmoke,
           run:
             "cargo test --manifest-path Cargo.toml -p openhuman --no-default-features" +
-            " --features mcp,e2e-test-support --lib --" +
-            " mcp::server::resources:: test_support::introspect::",
+            " --features modules,mcp,e2e-test-support --lib --" +
+            " modules::host:: modules::registry:: mcp::server::resources:: test_support::introspect::",
         },
         {
           name: "kernel-floor",

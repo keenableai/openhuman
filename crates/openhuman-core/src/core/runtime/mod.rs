@@ -47,6 +47,8 @@ pub mod agent_scope;
 pub mod boot_guard;
 mod bootstrap;
 pub mod builder;
+pub mod components;
+pub use components::{ComponentSet, COMPONENT_NAMES};
 pub mod context;
 pub mod domain_set;
 mod features;
@@ -65,3 +67,6 @@ pub use mode::{current_mode, is_saas, Mode};
 pub use saas::SaasConfig;
 pub use spawn::{spawn_blocking_scoped, spawn_scoped};
 pub use tenant::{current_tenant, session_key, session_key_prefix, tenant_key, NoTenant, Tenant};
+
+/// Operator-owned direct inference settings.
+pub mod direct_profile_provider;

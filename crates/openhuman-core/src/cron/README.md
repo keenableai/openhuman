@@ -25,8 +25,8 @@ the health subscriber, builds one `SecurityPolicy` from config, publishes
   interval tick
        |
        v
-  tick_once ---- due_jobs(config, now) ----> tinyflows_sqlite store
-       |              (jobs.db)
+  tick_once ---- due_jobs(config, now) ----> CronDocuments (storage ports)
+       |              (backend, or cron/schedule.db)
        |  error -> HealthChanged{healthy:false} (only on transition)
        |  ok    -> HealthChanged{healthy:true}  (only on transition)
        v
@@ -70,13 +70,18 @@ with exponential backoff starting at `reliability.provider_backoff_ms` (at
 least 200 ms).
 
 `shell` jobs run through `run_job_command_with_timeout`
-([`scheduler/shell_job.rs`](./scheduler/shell_job.rs)). Before spawning anything it checks the security
-policy in order: `can_act`, `is_rate_limited`, `is_command_allowed`, a scan of
-the arguments for forbidden paths, and `record_action` against the action
-budget. Any refusal returns a string starting `blocked by security policy:`,
-which the retry loop treats as final. The command has a hard 120 second timeout
-(`SHELL_JOB_TIMEOUT_SECS`). With the autonomy policy disabled (the default),
-most of these checks are inert; see the project `CLAUDE.md`.
+([`scheduler/shell_job.rs`](./scheduler/shell_job.rs)). Before spawning anything,
+it checks `can_act`, `is_rate_limited`, the host security policy against command
+facts returned by TinyBox `AnalyzeCommand`, and `record_action` against the
+action budget. Missing module analysis fails closed; no local parser replaces
+it. Any refusal returns a string starting `blocked by security policy:`, which
+the retry loop treats as final. Execution uses TinyBox `StartExec` on a
+module-owned passthrough resource, preserving the action directory and the
+shell's default pipeline exit status. The command has a hard 120 second timeout
+(`SHELL_JOB_TIMEOUT_SECS`); timeout cancellation and output cleanup are
+acknowledged by TinyBox before the resource is closed. With the autonomy policy
+disabled (the default), most policy checks are inert; see the project
+`CLAUDE.md`.
 
 `agent` jobs run a full agent turn ([`scheduler/agent_run.rs`](./scheduler/agent_run.rs)):
 
@@ -235,13 +240,18 @@ missing row, reschedules a drifted one, and removes the retired
 `memory_context_refresh` row. It runs from [`core/runtime/services.rs`](../core/runtime/services.rs) and from
 [`security/credentials/ops/user_scope.rs`](../security/credentials/ops/user_scope.rs).
 
-### On a storage backend
+### Storage
 
-With a storage backend configured (`OPENHUMAN_STORAGE_URL` / `[storage] url`,
-see `crate::storage`), every `store` function is served by
-`tinyflows_drivers::schedule::CronDocuments` instead of `cron/jobs.db`: the
-same jobs and runs on the document port, in the acting agent's storage scope,
-with the same history cap and due-job batch size. `reschedule_after_run`
+Every `store` function is served by `tinyflows_drivers::schedule::CronDocuments`,
+jobs and runs on the document port in the acting agent's storage scope, with
+the configured history cap and due-job batch size. tinyflows has no SQLite
+store of its own any more, so there is one path whatever the storage URL says:
+the installed backend when there is one, else a SQLite document database of the
+store's own (`<workspace>/cron/schedule.db`, an embedded agent's under
+`agents/<id>/cron/`). The `jobs.db` tinyflows used to write (with its policy
+side table) is imported read-only once, at boot for an installed backend
+(`storage::import::tinyflows`) and on first use otherwise, and is never written
+again. `reschedule_after_run`
 advances a job only if its stored schedule still matches the job that fired,
 so two processes sharing one database don't double-advance it.
 
@@ -250,7 +260,7 @@ so two processes sharing one database don't double-advance it.
 | Path | What it does |
 | --- | --- |
 | [`mod.rs`](./mod.rs) | Module wiring and re-exports. Re-exports the schedule types and pure schedule functions from `tinyflows_schedule` so `cron::CronJob`, `cron::Schedule` and friends resolve here. |
-| [`store.rs`](./store.rs) | Thin wrapper over `tinyflows_sqlite::schedule`. Turns `Config` into `CronStoreOptions` (`<workspace>/cron/jobs.db`, `cron.max_run_history`, `scheduler.max_tasks`) and forwards job CRUD, due-job queries and run history. |
+| [`store.rs`](./store.rs) | Thin wrapper over `tinyflows_drivers::schedule::CronDocuments`. Resolves the storage (`storage::local::open_standing`), applies `cron.max_run_history` and `scheduler.max_tasks`, and forwards job CRUD, due-job queries and run history. |
 | `ops.rs` | Business operations: `add_once`, `add_once_at`, `parse_human_delay`, pause/resume, `update_cron_job`, the `ACTIVE_RUNS` claim set, and the async `cron_*` RPC operations. Also re-exported as `cron::rpc`. |
 | [`schemas.rs`](./schemas.rs) | Controller schemas and handlers for the `cron` namespace. |
 | [`scheduler.rs`](./scheduler.rs) | `run`, `tick_once`, `process_due_jobs`, `execute_and_persist_job`. |
@@ -279,7 +289,7 @@ so two processes sharing one database don't double-advance it.
   `DeliveryStatus`, `ActiveHours`: the job and run model, defined in
   `tinyflows_schedule::types` and re-exported from `mod.rs`.
   `delivery_mode` holds the mode string constants.
-- `AgentJobSpec`: the store's agent-job creation spec (from `tinyflows_sqlite`),
+- `AgentJobSpec`: the store's agent-job creation spec (from `tinyflows_schedule`),
   used by `add_agent_job_from_spec`.
 - `scheduler::run(config)`: the service entry point.
 - `scheduler::execute_job_now` and `scheduler::deliver_job`: what Run Now uses
@@ -351,9 +361,9 @@ Cron publishes, through [`core/bus.rs`](../core/bus.rs), these `DomainEvent` var
 ## Boundaries
 
 - The schedule model, next-run computation, cadence floor and the SQLite store
-  (schema, CRUD, output truncation, pruning) belong to the `tinyflows`
+  (job and run documents, CRUD, output truncation, pruning) belong to the `tinyflows`
   submodule ([`vendor/tinyflows/crates/tinyflows-schedule`](../../../../vendor/tinyflows/crates/tinyflows-schedule/) and
-  `tinyflows-sqlite`). Change them there, not in `store.rs`.
+  `tinyflows-drivers`). Change them there, not in `store.rs`.
 - Shell sandboxing policy is `security::SecurityPolicy`. Cron only asks it.
 - Flow execution is the `flows` domain. Cron only emits `FlowScheduleTick`.
 - Channel construction and sending belong to `channels`. Cron reaches channels
@@ -372,12 +382,14 @@ Cron publishes, through [`core/bus.rs`](../core/bus.rs), these `DomainEvent` var
   the `cron_run` tool) from dispatch until its run is persisted, and the scheduler never
   dispatches a claimed job. A recurring job's `next_run` is advanced at dispatch
   (at-most-once per slot), then recomputed from the finish time as before.
-- Per-job `JobPolicy { retries, single_flight }` lives in a host-owned
-  `cron_job_policies` table in `jobs.db` (`policy.rs`); `CronJob` belongs to
-  `tinyflows-schedule`. No row is the default policy. `retries: Some(0)` means exactly one
-  attempt; with `single_flight` a slot that comes due mid-run is recorded as a `skipped`
-  run, and Run Now refuses while the job runs. The table stays in SQLite even with a
-  storage backend configured.
+- Per-job `JobPolicy { retries, single_flight }` is a field of the job
+  (`CronJob::policy`, from `tinyflows-schedule`); `policy.rs` only reads and
+  writes it through the store. The default policy is stored as none.
+  `retries: Some(0)` means exactly one attempt; with `single_flight` a slot that
+  comes due mid-run is recorded as a `skipped` run, and Run Now refuses while the
+  job runs. Policies kept apart from the job before (the `cron_job_policies`
+  table, then collection) are folded into the job by the importer and by
+  `CronDocuments` when it opens.
 - System jobs: `system_job_handlers::register(name, handler)` installs an awaited in-process
   handler; the scheduler still publishes `CronSystemJobDue`, then records the handler's
   result as the run's status. With no handler, behaviour is unchanged.
@@ -398,12 +410,26 @@ Tests sit beside their modules as `<module>_tests.rs` (for example
 [`scheduler_tests.rs`](./scheduler_tests.rs), which pulls in the `scheduler_*_tests.rs` files, plus
 [`store_tests.rs`](./store_tests.rs), [`ops_tests.rs`](./ops_tests.rs), [`origin_tests.rs`](./origin_tests.rs), [`job_builder_tests.rs`](./job_builder_tests.rs),
 [`system_jobs_tests.rs`](./system_jobs_tests.rs), `scheduler/origin_*_tests.rs` and the per-tool files in
-`tools/`). The store itself is tested in `tinyflows-sqlite`.
+`tools/`). The store itself is tested in `tinyflows-drivers`; the import of
+`jobs.db` is covered in `storage/import/tinyflows_tests.rs` and `store_tests.rs`.
 
 ```bash
 cargo test -p openhuman cron::
 pnpm debug rust cron
 ```
+
+## Agent-only limits (`limits.rs`)
+
+`[cron] agent_jobs_only = true` is an operator-owned mode for hosted
+profiles (`SaasConfig::cron` forces it, with `min_interval_secs` = 300 and
+`max_active_jobs` = 20, onto every profile; a profile's own config cannot
+loosen it). It refuses shell and flow jobs, restricts delivery to `origin` and
+`none`, requires a job to be created from a conversation (the origin is read
+from the live turn, never from tool arguments), keeps recurring jobs
+`min_interval_secs` apart and caps enabled jobs at `max_active_jobs`, counted
+in the store. Checks run in `store.rs` when a job is added or updated, and
+again where it runs (scheduler dispatch, Run Now, the run tool), so rows stored
+earlier are refused too.
 
 ## Further reading
 

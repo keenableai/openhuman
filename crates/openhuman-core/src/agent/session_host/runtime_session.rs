@@ -19,12 +19,18 @@ pub(super) use turn::begin_turn_resume;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tinyagents_graph::goals::ThreadGoalStatus;
 use tinyagents_runtime::{
     CommitReceipt, ResumePreparation, SessionBuilder, SessionTerminal, ToolSnapshot,
     TranscriptTarget, TurnPreparation,
 };
 use tinyinference_llm::message::Message;
 
+use super::announcement_notes::{
+    integration_announcement_note, mcp_announcement_note, skill_announcement_note,
+    skill_retraction_note,
+};
+use super::types::OpenHumanSessionHost;
 use crate::agent::{
     message_convert::{user_message_from_text, user_text_with_markers},
     session_host::{
@@ -32,12 +38,6 @@ use crate::agent::{
     },
     tinyagents::{host::OpenHumanRunContext, TurnContextMiddleware},
 };
-
-use super::announcement_notes::{
-    integration_announcement_note, mcp_announcement_note, skill_announcement_note,
-    skill_retraction_note,
-};
-use super::types::OpenHumanSessionHost;
 
 #[path = "runtime_session_progress.rs"]
 mod progress;
@@ -148,14 +148,9 @@ struct OpenHumanTurnPreludeMutable {
     pending_integration_announcement: Vec<String>,
     announced_mcp_servers: std::collections::HashSet<String>,
     pending_mcp_announcement: Vec<String>,
-    /// Live MCP tool definitions for this workspace, refreshed before each
-    /// turn so disconnects remove their deferred executors immediately.
+    /// Current catalogs and frozen names retained by the module tool adapter.
     #[cfg(feature = "mcp")]
-    connected_mcp_tools: Vec<crate::mcp::registry::types::ConnectedServerOverview>,
-    /// `mcp_*` tool names a resumed thread was sent, so a tool recorded under
-    /// its pre-readable hashed name is restored under that name too.
-    #[cfg(feature = "mcp")]
-    recorded_mcp_tool_names: std::collections::HashSet<String>,
+    mcp_tools: prelude_integrations::McpToolCatalog,
     announced_skills: std::collections::HashSet<String>,
     pending_skill_announcement: Vec<String>,
     pending_skill_retraction: Vec<String>,
@@ -168,7 +163,13 @@ struct OpenHumanTurnPreludeMutable {
     /// the tinyagents session on resume. Rebuilt into deferred executors whenever
     /// the live integrations list does not supply them (see `recorded_tools`).
     recorded_integration_actions: Vec<tinytools::ToolSpec>,
-    workflows: Vec<crate::skills::Workflow>,
+    /// TinyJuice REPL declarations restored by a resumed thread. These are
+    /// rebuilt independently of the current setting that creates new handles.
+    recorded_repl_tools: Vec<tinytools::ToolSpec>,
+    /// Distinguishes a new session from a resumed session whose recorded tool
+    /// snapshot simply had no TinyJuice declarations.
+    recorded_tool_snapshot_adopted: bool,
+    workflows: Vec<tinyskills::Skill>,
     composio_events: Option<tinybus::events::EventReceiver<crate::core::events::DomainEvent>>,
     skill_events: Option<tinybus::events::EventReceiver<crate::core::events::DomainEvent>>,
     /// The user-authored text of the in-flight turn, held until commit so the
@@ -354,130 +355,6 @@ impl OpenHumanTurnPrelude {
             .clone()
     }
 
-    /// Rebuild every delegation-dependent tool view from the current cached
-    /// integration set, replacing rather than appending. A revoked delegate is
-    /// removed from the executable source, schema, and policy together before
-    /// this request is prepared.
-    fn refresh_delegation_tool_surface(&self) -> anyhow::Result<()> {
-        use crate::agent::harness::definition::AgentDefinitionRegistry;
-        use crate::tools::agent_policy::ToolPolicyEngine;
-        use crate::tools::orchestrator_tools::collect_orchestrator_tools;
-
-        let Some(registry) = AgentDefinitionRegistry::current() else {
-            return Ok(());
-        };
-        let Some(definition) = self.session_definition(&registry) else {
-            return Ok(());
-        };
-        if definition.subagents.is_empty() {
-            return Ok(());
-        }
-        let (integrations, integrations_are_authoritative) = {
-            let mutable = self
-                .mutable
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                mutable.connected_integrations.clone(),
-                mutable.connected_integrations_authoritative,
-            )
-        };
-        #[cfg(feature = "mcp")]
-        let mcp_tools = self.collect_mcp_search_tools();
-        let mut surface = self
-            .tool_surface
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut collected = collect_orchestrator_tools(&definition, &registry, &integrations);
-        #[cfg(feature = "mcp")]
-        collected.extend(mcp_tools);
-        let rebuilt = self.rebuilt_recorded_tools(
-            &definition,
-            &surface.tools,
-            &collected,
-            &integrations,
-            integrations_are_authoritative,
-        );
-        collected.extend(rebuilt);
-        super::managed_tools::reject_synthesized_collisions(
-            &surface.permanent_tool_names,
-            &collected,
-        )?;
-        let synthesized =
-            super::builder::drop_synthesized_name_collisions(&surface.tools, collected);
-        let synthesized_names = synthesized
-            .iter()
-            .map(|tool| tool.name().to_string())
-            .collect::<std::collections::HashSet<_>>();
-        let previous_synthesized = std::mem::replace(
-            &mut surface.synthesized_tool_names,
-            synthesized_names.clone(),
-        );
-        let auto_include_new_synthesized_tools = surface.auto_include_new_synthesized_tools;
-        reconcile_synthesized_visibility(
-            &mut surface.visible_tool_names,
-            &previous_synthesized,
-            &synthesized_names,
-            auto_include_new_synthesized_tools,
-        );
-        // Preserve permanently attached tools when re-deriving the surface.
-        permanent::refresh_visibility(&mut surface, &synthesized);
-
-        let specs = surface
-            .durable_tool_specs
-            .iter()
-            .cloned()
-            .chain(synthesized.iter().map(|tool| Arc::new(tool.spec())))
-            .collect::<Vec<_>>();
-        let synthesized_tools = Arc::new(synthesized);
-        crate::tools::toolpacks::bind_synthesized_pack_registry(&surface.tools, &synthesized_tools);
-        let all_tools = surface
-            .tools
-            .iter()
-            .chain(synthesized_tools.iter())
-            .map(|tool| tool.as_ref())
-            .collect::<Vec<_>>();
-        // Advertised plus deferred, like the session host: a deferred tool
-        // outside the set would be `HideFromPrompt`, which the direct-call
-        // gate refuses.
-        let reachable: std::collections::HashSet<String> = if surface.visible_tool_names.is_empty()
-        {
-            std::collections::HashSet::new()
-        } else {
-            surface
-                .visible_tool_names
-                .iter()
-                .chain(surface.deferred_tool_names.iter())
-                .cloned()
-                .collect()
-        };
-        let mut policy = ToolPolicyEngine::build_session_from_refs(
-            &surface.agent_definition_name,
-            &surface.event_channel,
-            "session",
-            &self.config.channel_permissions,
-            &all_tools,
-            &reachable,
-        );
-        crate::tools::toolpacks::close_handed_off_packs(
-            &mut policy,
-            &surface.agent_definition_name,
-            &all_tools,
-        );
-        let visible = super::builder::dedup_visible_tool_specs(
-            super::builder::visible_tool_specs_for_policy(
-                &specs,
-                &surface.visible_tool_names,
-                &policy,
-            ),
-        );
-        surface.tool_specs = Arc::new(specs);
-        surface.synthesized_tools = synthesized_tools;
-        surface.visible_tool_specs = Arc::new(visible);
-        surface.tool_policy_session = policy;
-        Ok(())
-    }
-
     fn drain_host_events(&self) -> bool {
         let mut mutable = self
             .mutable
@@ -540,9 +417,7 @@ impl OpenHumanTurnPrelude {
             )
             .await;
             match loaded {
-                Some(goal)
-                    if matches!(goal.status, crate::agent::goals::ThreadGoalStatus::Paused) =>
-                {
+                Some(goal) if matches!(goal.status, ThreadGoalStatus::Paused) => {
                     crate::agent::goals::runtime::resume_for_thread(
                         &self.workspace_dir,
                         self.thread_id.as_deref(),
@@ -857,8 +732,6 @@ impl OpenHumanSessionHost {
         };
         let artifact_store = super::artifact_wiring::build_artifact_store(
             &self.workspace_dir,
-            self.workspace_descriptor.as_ref(),
-            &self.action_dir,
             &self.event_session_id,
         );
 
@@ -982,9 +855,7 @@ impl OpenHumanSessionHost {
                     announced_mcp_servers: self.announced_mcp_servers.clone(),
                     pending_mcp_announcement: self.pending_mcp_announcement.clone(),
                     #[cfg(feature = "mcp")]
-                    connected_mcp_tools: Vec::new(),
-                    #[cfg(feature = "mcp")]
-                    recorded_mcp_tool_names: std::collections::HashSet::new(),
+                    mcp_tools: prelude_integrations::McpToolCatalog::default(),
                     announced_skills: self.announced_skills.clone(),
                     pending_skill_announcement: self.pending_skill_announcement.clone(),
                     pending_skill_retraction: self.pending_skill_retraction.clone(),
@@ -994,6 +865,8 @@ impl OpenHumanSessionHost {
                     connected_integrations_authoritative: false,
                     integration_announcements_seeded: false,
                     recorded_integration_actions: Vec::new(),
+                    recorded_repl_tools: Vec::new(),
+                    recorded_tool_snapshot_adopted: false,
                     workflows: self.workflows.clone(),
                     composio_events: None,
                     skill_events: None,
@@ -1212,21 +1085,21 @@ impl OpenHumanSessionHost {
                 }
             },
         ));
-        // Bind the transcript at construction for a thread-bound session,
-        // rather than leaving it to the per-turn `before_resume` hook. The
-        // hook still supplies the same target, but binding it here means the
-        // session knows its own durable destination before any turn runs —
-        // which is what lets a host read the conversation back without
-        // driving a provider first.
+        // Bind the hook's native target early so both thread and latest-agent
+        // resumes can read recorded declarations before host admission.
         let mut builder = SessionBuilder::new(driver)
             .codec(Arc::new(OpenHumanTranscriptCodec))
             .hooks(hooks)
             .retain_recorded_tools(
                 !self.host_only && crate::agent::tool_snapshot_scope::retain_recorded_tools(),
             );
-        if let Some(session) = self.session.clone() {
-            builder = builder.session(session_locator, session, self.runtime_transcript_meta());
-        }
+        let meta = self.runtime_transcript_meta();
+        builder = match self.session.clone() {
+            Some(session) => builder.session(session_locator, session, meta),
+            None => builder
+                .transcript(session_locator, self.runtime_transcript_stem(), meta)
+                .resume_agent(self.agent_definition_name.clone()),
+        };
         self.runtime_session = Some(
             builder
                 .build()
@@ -1284,6 +1157,13 @@ impl OpenHumanSessionHost {
         });
     }
 }
+
+#[path = "runtime_session_tool_surface.rs"]
+mod tool_surface;
+
+#[cfg(test)]
+#[path = "runtime_session_juice_tests.rs"]
+mod juice_tests;
 
 #[path = "prelude_integrations.rs"]
 mod prelude_integrations;

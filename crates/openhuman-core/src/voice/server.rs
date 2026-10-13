@@ -8,13 +8,13 @@
 //! ## Module layout
 //!
 //! - [`types`] — run state, status snapshot, and server config.
-//! - [`hotkey_listener`] — rdev vs. the macOS Swift globe listener.
+//! - [`hotkey_listener`] — TinyVoice native listeners and the macOS Globe composition.
 //! - [`pipeline`] — the background recording → transcription pass.
 //! - [`runtime`] — the hotkey event loop that drives a `VoiceServer`.
 //! - [`singleton`] — the process-global instance, auto-start, and the
 //!   standalone (CLI) entry point.
 
-mod hotkey_listener;
+pub(crate) mod hotkey_listener;
 mod pipeline;
 mod runtime;
 mod singleton;
@@ -29,14 +29,14 @@ use crate::config::Config;
 #[cfg(test)]
 use crate::voice::audio_capture::RecordingHandle;
 #[cfg(test)]
-use crate::voice::hotkey::ActivationMode;
-#[cfg(test)]
 use pipeline::{
     build_initial_prompt, capture_expected_app_name, process_recording_bg, push_recent_transcript,
     truncate_for_log, update_state_if_current,
 };
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
+use tinyvoice_bus::hotkey::ActivationMode;
 #[cfg(test)]
 use tokio::sync::Mutex;
 #[cfg(test)]

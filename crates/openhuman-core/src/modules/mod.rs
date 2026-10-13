@@ -30,37 +30,90 @@
 //! - [`documents`] — the host half of the `tinydocs` module's three operations.
 //! - [`browser`] and [`browser_task`] — TinyComputer browser members and tasks
 //!   without linking the browser engine into the core; [`browser_sites`] keeps
-//!   what finished tasks learned about each site for the next task there.
+//!   what finished tasks learned about each site for the next task there, and
+//!   [`browser_profile`] tells whether a Chrome holds the persistent profile
+//!   and claims it for a browser about to start.
 //! - [`wallet`] — the host half of the `tinywallet` module, which builds and
 //!   assembles transactions while the signing key stays in this process.
+//! - [`linked`] — the registry of modules linked into the executable (local development).
 //! - [`host`] — the module broker, connection and loader.
 //! - [`ops`] — resolving, loading, and reporting status.
 //! - [`schemas`] — the `modules` RPC surface.
 //! - [`boot`] — what happens at startup.
 
+pub mod accessibility;
+#[cfg(feature = "modules")]
 pub mod boot;
+#[cfg(feature = "modules")]
 pub mod browser;
+#[cfg(feature = "modules")]
+pub(crate) mod browser_profile;
+#[cfg(feature = "modules")]
 pub(crate) mod browser_sites;
+#[cfg(feature = "modules")]
 pub mod browser_task;
+#[cfg(feature = "modules")]
 mod browser_task_report;
+#[cfg(feature = "channels")]
+pub(crate) mod channel_controller;
+pub(crate) mod channel_health;
+#[cfg(all(feature = "channels", feature = "modules"))]
+pub(crate) mod channel_runtime;
+pub mod client;
+#[cfg(feature = "modules")]
 pub mod computer;
+#[cfg(feature = "modules")]
 pub mod computer_config;
+#[cfg(feature = "modules")]
 pub mod connectors;
+#[cfg(feature = "modules")]
 pub mod desktop;
 #[cfg(feature = "documents")]
+#[cfg(feature = "modules")]
 pub mod documents;
+mod failure;
+#[cfg(feature = "modules")]
 pub mod host;
+#[cfg(feature = "modules")]
+pub mod linked;
+#[cfg(feature = "modules")]
 pub mod ops;
 pub mod registry;
+#[cfg(feature = "modules")]
 pub mod schemas;
+#[cfg(feature = "modules")]
 pub mod search;
+#[cfg(feature = "modules")]
+mod search_path;
+mod source;
+#[cfg(feature = "modules")]
+pub mod storage_grants;
+#[cfg(feature = "modules")]
+mod storage_host;
+#[cfg(feature = "modules")]
+pub mod tinybox;
+#[cfg(feature = "modules")]
 mod tokenjuice_host;
 pub mod types;
 #[cfg(feature = "voice")]
+#[cfg(feature = "modules")]
 pub mod voice;
 #[cfg(feature = "web3")]
+#[cfg(feature = "modules")]
 pub mod wallet;
+#[cfg(feature = "web3")]
+mod wallet_host;
+#[cfg(feature = "web3")]
+pub(crate) mod wallet_service;
+#[cfg(feature = "web3")]
+pub(crate) mod web3_service;
+#[cfg(feature = "web3")]
+pub(crate) mod x402_service;
 
+#[cfg(feature = "modules")]
 pub use ops::{ensure_loaded, ensure_loaded_within, state_of, LoadError};
+#[cfg(feature = "modules")]
 pub use schemas::{all_controller_schemas, all_registered_controllers};
-pub use types::{LoadPolicy, ModuleRecord, ModuleState, ModuleStatus, PlatformAsset};
+#[doc(hidden)]
+pub use source::local_artifact;
+pub use types::{LoadPolicy, ModuleRecord, ModuleSource, ModuleState, ModuleStatus, PlatformAsset};

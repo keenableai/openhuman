@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CHAIN_GATES_NOT_FORWARDED,
   CHAIN_LOCAL_GATES,
+  checkLinkedModulesIsolation,
   checkProductForwarding,
   diffChainForwarding,
   diffForwarding,
@@ -277,7 +278,7 @@ test('the real product file and the real shell list are equal', () => {
   // Guards the guard: empty input would make every assertion below vacuous.
   assert.ok(productFeatures.length > 0, 'expected to parse at least one product gate');
   assert.ok(coreFeatureNames.length > 0, 'expected to parse at least one core gate name');
-  const result = checkProductForwarding({ productFeatures, coreFeatureNames, shell });
+  const result = checkProductForwarding({ productFeatures, coreFeatureNames, hostFeatureNames: parseCoreFeatureNames(readFileSync(resolve(REPO_ROOT, "crates/openhuman-rpc/Cargo.toml"), "utf8")), shell });
   assert.deepEqual(result.missing, [], 'product gates the shell does not forward');
   assert.deepEqual(result.unexpected, [], 'gates the shell forwards that the product omits');
   assert.deepEqual(result.unknown, [], 'product gates that are not real core gates');
@@ -823,6 +824,7 @@ default = ["http-client", "server"]
 http-client = ["dep:reqwest"]
 server = ["http-server", "dep:axum", "session-store"]
 session-store = ["dep:tinyagents-session"]
+os-keyring = ["dep:keyring"]
 http-server = ["openhuman-tinyhumans/http-server"]
 voice = ["openhuman-tinyhumans/voice"]
 `);
@@ -894,4 +896,70 @@ test('the checker reports the chain and fails when a layer drops a gate', () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('product gates may be owned by a host crate while still requiring shell forwarding', () => {
+  const input = {
+    productFeatures: ['voice', 'os-keyring'],
+    coreFeatureNames: ['voice'],
+    hostFeatureNames: ['os-keyring'],
+    shell: { defaultFeatures: false, features: ['voice', 'os-keyring'] },
+  };
+  assert.ok(checkProductForwarding(input).ok);
+  assert.deepEqual(checkProductForwarding({ ...input, shell: { defaultFeatures: false, features: ['voice'] } }).missing, ['os-keyring']);
+  assert.deepEqual(checkProductForwarding({ ...input, hostFeatureNames: [] }).unknown, ['os-keyring']);
+});
+
+test('OS keychain is owned by RPC and must be forwarded by CLI and TUI', () => {
+  const rpc = parseFeatureTable('[features]\nos-keyring = ["dep:keyring"]\nserver = ["os-keyring"]\n');
+  assert.deepEqual(rpcForwardedGates(rpc), ['os-keyring']);
+});
+
+test('core product builds omit host-owned OS keychain features', () => {
+  const result = spawnSync('bash', ['scripts/ci/product-features.sh', '--core'], { cwd: REPO_ROOT, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.trim().split(',').includes('storage-sqlite'));
+  assert.ok(!result.stdout.trim().split(',').includes('os-keyring'));
+});
+
+// ── linked-modules isolation (E0.2) ────────────────────────────────────────
+
+test('the real manifests keep linked-modules out of every shipped path', () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+  const read = rel => readFileSync(join(root, rel), 'utf8');
+  assert.deepEqual(
+    checkLinkedModulesIsolation({
+      productFeatures: parseProductFeatures(read('scripts/ci/product-features.txt')),
+      shellToml: read('crates/openhuman-app/Cargo.toml'),
+      cliFeatures: parseFeatureTable(read('crates/openhuman-cli/Cargo.toml')),
+    }),
+    []
+  );
+  assert.ok('linked-modules' in CHAIN_LOCAL_GATES['openhuman-cli']);
+});
+
+test('deliberate violations of linked-modules isolation are each reported', () => {
+  const clean = { productFeatures: ['voice'], shellToml: '[dependencies]\nopenhuman-rpc = {}\n', cliFeatures: new Map() };
+  assert.deepEqual(checkLinkedModulesIsolation(clean), []);
+  assert.equal(
+    checkLinkedModulesIsolation({ ...clean, productFeatures: ['voice', 'linked-modules'] }).length,
+    1
+  );
+  assert.equal(
+    checkLinkedModulesIsolation({ ...clean, shellToml: 'openhuman-rpc = { features = ["linked-modules"] }\n' }).length,
+    1
+  );
+  assert.equal(
+    checkLinkedModulesIsolation({ ...clean, shellToml: 'openhuman-modules-linked = { path = "x" }\n' }).length,
+    1
+  );
+  assert.equal(
+    checkLinkedModulesIsolation({ ...clean, cliFeatures: new Map([['default', ['modules', 'linked-modules']]]) }).length,
+    1
+  );
+  // A mention in a comment is not a dependency on it.
+  assert.deepEqual(
+    checkLinkedModulesIsolation({ ...clean, shellToml: '# never linked-modules here\n[dependencies]\n' }),
+    []
+  );
 });

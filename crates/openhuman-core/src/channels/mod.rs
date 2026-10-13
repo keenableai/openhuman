@@ -1,42 +1,24 @@
-//! Channel implementations and runtime orchestration.
+//! Channel contracts and OpenHuman runtime orchestration.
 //!
-//! Compile-time gate (`channels`, default-ON — #4801): the whole domain lives
-//! behind the feature EXCEPT two dependency-free carve-outs that always-on code
-//! reaches directly:
-//!
-//! * `traits` — a one-line re-export of the `tinychannels` `Channel` /
-//!   `SendMessage` traits, named by the always-on agent-harness interactive
-//!   loop (`agent::session_host::runtime::run_interactive`).
-//! * `CliChannel` — the local stdin/stdout REPL the same interactive loop
-//!   drives in every build, re-exported from the lightweight
-//!   `tinychannels-runtime` crate.
-//! * `contract_schema` — the `tinychannels-bus` controller-schema conversion,
-//!   shared with `openhuman-tinyhumans`, which serves the managed-bot link
-//!   controllers (`channels.telegram_login_*`, `channels.discord_link_*`).
-//!
-//! Everything else (`providers`, `host`, `controllers`, `runtime`, `bus`,
-//! `proactive`, `commands`, `context`, `routes`,
-//! the provider re-exports,
-//! `doctor_channels`, `start_channels`, the `build_system_prompt` re-export and
-//! the `test_support` re-export) is `#[cfg(feature = "channels")]`.
-//! Nothing INSIDE those submodules changes when the gate flips.
-//!
-//! The gate sheds ZERO dependencies — `tinychannels` stays load-bearing for the
-//! config schema, the `DomainEvent` inbound envelope and security pairing — so
-//! its value is compile-time surface + binary size, not the dep tree. See
-//! AGENTS.md "channels gate".
+//! Provider orchestration is gated by `channels` and runs through the
+//! TinyChannels TinyBus module. Serialized configuration, messages, and
+//! schemas come from `tinychannels-bus`; OpenHuman retains host policy and
+//! lifecycle orchestration.
 
 // Always-compiled carve-outs (see module docs).
 pub mod contract_schema;
+#[cfg(any(feature = "voice", feature = "channels"))]
+pub(crate) mod credentials;
 pub mod traits;
 
-pub use tinychannels_runtime::CliChannel;
 pub use traits::{Channel, ChannelSendExt, SendMessage};
 
 #[cfg(feature = "channels")]
 pub mod bus;
 #[cfg(feature = "channels")]
 mod commands;
+#[cfg(feature = "channels")]
+pub(crate) use commands::{configured_providers, has_listener_configuration};
 #[cfg(feature = "channels")]
 pub(crate) mod context;
 #[cfg(feature = "channels")]
@@ -60,76 +42,74 @@ pub(crate) use system_prompt::ChannelSystemPrompt;
 #[cfg(all(feature = "channels", test))]
 mod tests;
 
-// Stable `channels::<provider>` paths (implementation lives under `providers/`).
-#[cfg(feature = "channels")]
+// Legacy provider paths are retained for unit fixtures only. Production callers
+// use the module-backed runtime and the portable bus contracts above.
+#[cfg(all(feature = "channels", test))]
 pub use providers::dingtalk;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::discord;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::email_channel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::imessage;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::irc;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::lark;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::linq;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::mattermost;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::qq;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::signal;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::slack;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::telegram;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::whatsapp;
-#[cfg(feature = "whatsapp-web")]
+#[cfg(all(feature = "whatsapp-web", test))]
 pub use providers::whatsapp_web;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use providers::yuanbao;
 
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use dingtalk::DingTalkChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use discord::DiscordChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use email_channel::EmailChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use imessage::IMessageChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use irc::IrcChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use lark::LarkChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use linq::LinqChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use mattermost::MattermostChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use qq::QQChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use signal::SignalChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use slack::SlackChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use telegram::TelegramChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use whatsapp::WhatsAppChannel;
-#[cfg(feature = "whatsapp-web")]
+#[cfg(all(feature = "whatsapp-web", test))]
 pub use whatsapp_web::WhatsAppWebChannel;
-#[cfg(feature = "channels")]
+#[cfg(all(feature = "channels", test))]
 pub use yuanbao::YuanbaoChannel;
 
 #[cfg(all(feature = "channels", any(test, debug_assertions)))]
 pub use runtime::test_support;
 
 #[cfg(feature = "channels")]
-pub use commands::doctor_channels;
-#[cfg(feature = "channels")]
-pub use controllers::{ChannelAuthMode, ChannelDefinition};
 // Channel system-prompt assembly lives in
 // `crate::agent::context::channels_prompt` alongside the rest of
 // the prompt-building code. Re-exported here for callers that used the
@@ -137,6 +117,12 @@ pub use controllers::{ChannelAuthMode, ChannelDefinition};
 #[cfg(feature = "channels")]
 pub use crate::agent::context::channels_prompt::build_system_prompt;
 #[cfg(feature = "channels")]
+pub use commands::doctor_channels;
+#[cfg(feature = "channels")]
 pub use runtime::start_channels;
 #[cfg(feature = "channels")]
 pub(crate) use runtime::{session, start_channels_with_session};
+
+#[cfg(all(test, feature = "channels", feature = "modules"))]
+#[path = "module_fixture_tests.rs"]
+pub(crate) mod module_fixture;

@@ -8,6 +8,7 @@ set -euo pipefail
 
 OUT="${OUT:-lcov-core.info}"
 PRODUCT_FEATURES="$(bash scripts/ci/product-features.sh)"
+CORE_PRODUCT_FEATURES="$(bash scripts/ci/product-features.sh --core)"
 
 # Sandboxed acting-tool tests deliberately do not forward RUSTUP_HOME. The
 # container installs Rust outside HOME, so its rustup proxy otherwise tries
@@ -33,7 +34,7 @@ llvm_cov() {
       ;;
     *)
       bash scripts/ci-cancel-aware.sh cargo llvm-cov \
-        --features "${PRODUCT_FEATURES}" "$@"
+        --features "${CORE_PRODUCT_FEATURES}" "$@"
       ;;
   esac
 }
@@ -44,19 +45,11 @@ llvm_cov_package() {
 
 llvm_cov_product_facade() {
   bash scripts/ci-cancel-aware.sh cargo llvm-cov \
-    --features "${PRODUCT_FEATURES}" "$@"
+    --features "${CORE_PRODUCT_FEATURES}" "$@"
 }
 
 llvm_cov_embed() {
-  (
-    # Embed's integration hosts persist fixture credentials with the real
-    # encrypted backend. Supply only this suite a disposable master key;
-    # core's missing-key regressions and the caller's environment stay intact.
-    unset OPENHUMAN_KEYRING_MASTER_KEY_FILE
-    OPENHUMAN_KEYRING_MASTER_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-    export OPENHUMAN_KEYRING_MASTER_KEY
-    llvm_cov_product_facade "$@"
-  )
+  llvm_cov_product_facade "$@"
 }
 
 integration_test_targets() {
@@ -166,6 +159,12 @@ run_integration_target() {
   fi
 }
 
+run_build_only_reaper_test() {
+  suite "openhuman reaper (isolated)" llvm_cov --no-report --no-fail-fast -p openhuman --lib -- \
+    agent::tinyagents::reaper::tests::a_build_only_runtime_is_swept_before_it_can_be_invoked \
+    --exact --test-threads=1
+}
+
 if [ "${OH_COV_RUNNER:-cargo}" = "nextest" ]; then
   # One process per test means one .profraw per process by default (the name
   # carries %p): ~11,800 files and ~50 GB for the core alone, which the report
@@ -222,9 +221,7 @@ else
     --skip a_build_only_runtime_is_swept_before_it_can_be_invoked
 
   log "running isolated build-only reaper test"
-  suite "openhuman reaper (isolated)" llvm_cov --no-report --no-fail-fast -p openhuman --lib -- \
-    openhuman::agent::tinyagents::reaper::tests::a_build_only_runtime_is_swept_before_it_can_be_invoked \
-    --exact --test-threads=1
+  run_build_only_reaper_test
 fi
 
 # Run every root-workspace Rust support crate rather than only crates named by

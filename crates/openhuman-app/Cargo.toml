@@ -71,6 +71,7 @@ serde_json = "1"
 # embedded JSON-RPC server and `host::desktop`) and `jev` (the Jev-backed
 # `tool_search` ranker the product ships).
 openhuman-rpc = { path = "../openhuman-rpc", default-features = false, features = [
+    "os-keyring",
     "http-client",
     "server",
     "jev",
@@ -130,14 +131,6 @@ url = "2"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand = "0.9"
-# tinybox: reach (local/ssh) and confinement (passthrough/docker) as
-# independent axes, which is what lets one `GatewaySpec::Box` variant cover a
-# container here, a machine over there, and a container over there. Vendored as
-# a submodule and taken by path, the same shape as the other tiny* crates.
-tinybox-core = { path = "../../vendor/tinybox/crates/tinybox-core", optional = true }
-tinybox-host = { path = "../../vendor/tinybox/crates/tinybox-host", optional = true }
-tinybox-ssh = { path = "../../vendor/tinybox/crates/tinybox-ssh", optional = true }
-tinybox-docker = { path = "../../vendor/tinybox/crates/tinybox-docker", optional = true }
 hex = "0.4"
 # Tauri's vendored dev-server proxy (see `vendor/tauri-cef/.../protocol/tauri.rs`)
 # builds a reqwest 0.13 client that requires a process-wide rustls
@@ -272,19 +265,14 @@ windows-sys = { version = "0.59", features = [
 [features]
 default = ["gateways"]
 # Routing the frontend to a core somewhere other than this process: a
-# container, a machine over SSH, or a container on a machine over SSH. Pulls in
-# the tinybox crates that provision and reach those boxes.
+# container, a machine over SSH, or a container on a machine over SSH. Calls
+# the TinyBox module through openhuman-rpc's curated embed facade.
 #
 # This is a **shell-local** gate, unrelated to the feature-forwarding rules in
 # AGENTS.md: those govern which product gates the shell forwards on its
 # `openhuman-rpc` dependency, and `scripts/ci/check-feature-forwarding.mjs`
 # reads that dependency's feature list, not this table. Nothing here belongs in `scripts/ci/product-features.txt`.
-gateways = [
-    "dep:tinybox-core",
-    "dep:tinybox-docker",
-    "dep:tinybox-host",
-    "dep:tinybox-ssh",
-]
+gateways = []
 # `custom-protocol` switches Tauri from `devUrl` (vite dev server) to the
 # bundled `frontendDist` served via `tauri://localhost`. `cargo tauri build`
 # turns this on automatically for release; do not put it in `default` or
@@ -302,6 +290,7 @@ e2e-test-support = ["openhuman-rpc/e2e-test-support"]
 # `Tool` trait. Without this, MCP tools would not satisfy the harness's trait.
 tinytools = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools" }
 tinytools-agent = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
+tinytools-std = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools-std" }
 
 [patch."https://github.com/tinyhumansai/tinyinference"]
 # Crates in this world name tinyinference by git rev; without this the shell
@@ -313,10 +302,17 @@ tinyinference-llm = { path = "../../vendor/tinyagents/vendor/tinyinference/crate
 tinyinference-local = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
 tinyinference-voice = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
 
+[patch."https://github.com/tinyhumansai/tinybus"]
+# tinystoragedrivers-bus names tinybus by git rev. Redirect it to the in-tree
+# copy so the graph holds exactly one `tinybus` (one `Interface`, one
+# `Connection`) instead of a second one compiled only for the storage wire types.
+tinybus = { path = "../../vendor/tinybus/crates/tinybus" }
+
 [patch."https://github.com/tinyhumansai/tinystoragedrivers"]
-# tinyflows names the storage crates by git tag; redirect them to the copy
-# tinyagents vendors so this world links one `DocumentStore` trait and one
-# `libsqlite3-sys`. Mirrors the root Cargo.toml.
+# tinyflows names the storage crates by git tag (v0.7.0); redirect them to the
+# copy tinyagents vendors so this world links one `DocumentStore` trait and one
+# `libsqlite3-sys`. Still needed although the versions agree: a git and a path
+# source are distinct packages. Mirrors the root Cargo.toml.
 tinystoragedrivers-core = { path = "../../vendor/tinyagents/vendor/tinystoragedrivers/crates/tinystoragedrivers-core" }
 tinystoragedrivers-sqlite = { path = "../../vendor/tinyagents/vendor/tinystoragedrivers/crates/tinystoragedrivers-sqlite" }
 
@@ -342,7 +338,6 @@ tinyinference-voice = { path = "../../vendor/tinyagents/vendor/tinyinference/cra
 # TinyFlows and TinyChannels are vendored beside TinyAgents so integration
 # work can test crate changes against OpenHuman before publishing.
 tinyflows = { path = "../../vendor/tinyflows/crates/tinyflows" }
-tinychannels = { path = "../../vendor/tinychannels" }
 
 
 [dev-dependencies]

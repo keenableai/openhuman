@@ -54,6 +54,12 @@ pub struct CustomEmbeddingsConfig {
 /// `Clone` is implemented by hand in `config_clone.rs` so it is emitted once.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
+    /// Immutable operator provider binding, absent from the user wire format.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[doc(hidden)]
+    pub profile_providers:
+        Option<std::sync::Arc<crate::profiles::provider_settings::ProfileProviderSettings>>,
     #[serde(skip)]
     pub workspace_dir: PathBuf,
     /// Agent action sandbox root — the default cwd for shell/file/git tools.
@@ -414,6 +420,11 @@ pub struct Config {
     /// TokenJuice content-router / compaction configuration.
     #[serde(default)]
     pub tokenjuice: TokenjuiceConfig,
+
+    /// Per-dependency switches (`[components]`). Narrow-only; applied at the
+    /// next core start.
+    #[serde(default)]
+    pub components: ComponentsConfig,
 
     /// Hosting provider credentials and switch (`hosting` feature).
     #[serde(default)]

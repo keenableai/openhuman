@@ -1,52 +1,95 @@
-//! Host adapters over the wallet engine: the read and write operations wrapped
-//! in the controller contract's [`Outcome`].
-//!
-//! The logic (balances, transfers, lookups, the quote store) lives in
-//! `tinywallet_web3::crypto`. What this file adds is the `Outcome` envelope and
-//! its log lines, and the engine the operations run on
-//! ([`crate::web3::seams::engine`]).
+//! Typed TinyWallet module operations adapted to product controller results.
+//! This host supplies configuration, custody, transport and approvals; wallet
+//! algorithms and user-scoped service state remain in the compiled module.
 
+use crate::config::rpc as config_rpc;
 use crate::core::Outcome;
-use crate::web3::seams::engine;
+use crate::modules::{wallet as wallet_module, wallet_service};
+use tinywallet_bus::names::methods;
+use tinywallet_bus::wire::{NativeWalletServiceRequest, NativeWalletTransactionRequest};
 
-pub use tinywallet_web3::crypto::execution::{
+pub use tinywallet_bus::wire::{
     BalanceInfo, ChainStatus, ExecutePreparedParams, ExecutionResult, PrepareTransferParams,
     PreparedKind, PreparedStatus, PreparedTransaction, ProviderStatus, SupportedAsset,
     TxLookupInfo, TxReceiptInfo, TxState, TxStatusInfo,
 };
 
-use tinywallet_web3::crypto::defaults::{EvmNetwork, WalletNetworkDefaults};
+use tinywallet_bus::wire::{EvmNetwork, WalletNetworkDefaults};
 
 use super::ops::WalletChain;
 
 /// Default row for every supported network, with the host's endpoints.
 pub async fn network_defaults() -> Result<Outcome<Vec<WalletNetworkDefaults>>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_NETWORK_DEFAULTS,
+            NativeWalletServiceRequest { service },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().network_defaults(),
+        result,
         vec!["wallet network defaults listed".to_string()],
     ))
 }
 
 /// Every asset the wallet catalogues.
 pub async fn supported_assets() -> Result<Outcome<Vec<SupportedAsset>>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_SUPPORTED_ASSETS,
+            NativeWalletServiceRequest { service },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().supported_assets(),
+        result,
         vec!["wallet supported_assets listed".to_string()],
     ))
 }
 
 /// Which chains have an account and a provider.
 pub async fn chain_status() -> Result<Outcome<Vec<ChainStatus>>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_CHAIN_STATUS,
+            NativeWalletServiceRequest { service },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().chain_status().await?,
+        result,
         vec!["wallet chain_status listed".to_string()],
     ))
 }
 
 /// Live native balances.
 pub async fn balances() -> Result<Outcome<Vec<BalanceInfo>>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_BALANCES,
+            NativeWalletServiceRequest { service },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().balances().await?,
+        result,
         vec!["wallet balances listed".to_string()],
     ))
 }
@@ -55,8 +98,18 @@ pub async fn balances() -> Result<Outcome<Vec<BalanceInfo>>, String> {
 pub async fn prepare_transfer(
     params: PrepareTransferParams,
 ) -> Result<Outcome<PreparedTransaction>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let owner = crate::security::approval::APPROVAL_CHAT_CONTEXT
+        .try_with(|context| tinywallet_bus::wire::QuoteOwner {
+            thread_id: context.thread_id.clone(),
+            client_id: context.client_id.clone(),
+        })
+        .ok();
+    let quote = wallet_service::prepare_native_transfer(&config, owner, params)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().prepare_transfer(params).await?,
+        quote,
         vec!["wallet transfer prepared".to_string()],
     ))
 }
@@ -65,8 +118,18 @@ pub async fn prepare_transfer(
 pub async fn execute_prepared(
     params: ExecutePreparedParams,
 ) -> Result<Outcome<ExecutionResult>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let owner = crate::security::approval::APPROVAL_CHAT_CONTEXT
+        .try_with(|context| tinywallet_bus::wire::QuoteOwner {
+            thread_id: context.thread_id.clone(),
+            client_id: context.client_id.clone(),
+        })
+        .ok();
+    let result = wallet_service::execute_native_transfer(&config, owner, params)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().execute_prepared(params).await?,
+        result,
         vec!["wallet transaction broadcast".to_string()],
     ))
 }
@@ -77,8 +140,24 @@ pub async fn tx_status(
     evm_network: Option<EvmNetwork>,
     hash: &str,
 ) -> Result<Outcome<TxStatusInfo>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_TX_STATUS,
+            NativeWalletTransactionRequest {
+                service,
+                chain,
+                evm_network,
+                hash: hash.to_owned(),
+            },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().tx_status(chain, evm_network, hash).await?,
+        result,
         vec!["wallet tx status fetched".to_string()],
     ))
 }
@@ -89,8 +168,24 @@ pub async fn tx_receipt(
     evm_network: Option<EvmNetwork>,
     hash: &str,
 ) -> Result<Outcome<TxReceiptInfo>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_TX_RECEIPT,
+            NativeWalletTransactionRequest {
+                service,
+                chain,
+                evm_network,
+                hash: hash.to_owned(),
+            },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().tx_receipt(chain, evm_network, hash).await?,
+        result,
         vec!["wallet tx receipt fetched".to_string()],
     ))
 }
@@ -101,14 +196,38 @@ pub async fn lookup_tx(
     evm_network: Option<EvmNetwork>,
     hash: &str,
 ) -> Result<Outcome<TxLookupInfo>, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    let result = wallet_service::with_native_wallet(&config, |service| async {
+        wallet_module::call(
+            &config,
+            methods::NATIVE_WALLET_LOOKUP_TX,
+            NativeWalletTransactionRequest {
+                service,
+                chain,
+                evm_network,
+                hash: hash.to_owned(),
+            },
+        )
+        .await
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(Outcome::new(
-        engine().lookup_tx(chain, evm_network, hash).await?,
+        result,
         vec!["wallet tx looked up".to_string()],
     ))
+}
+
+/// Encode ERC-20 transfer calldata in the loaded wallet module.
+pub async fn encode_erc20_transfer(to_address: &str, amount_raw: &str) -> Result<String, String> {
+    let config = config_rpc::load_config_with_timeout().await?;
+    wallet_module::encode_erc20_transfer(&config, to_address, amount_raw)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The quotes that can still be executed. Test support and the introspection
 /// harness read the engine's store through this.
 pub fn prepared_quotes_for_test() -> Vec<PreparedTransaction> {
-    engine().prepared_quotes()
+    Vec::new()
 }

@@ -20,10 +20,10 @@ use crate::agent::harness::tool_result_artifacts::{
 };
 use crate::agent::tinyagents::payload_summarizer::PayloadSummarizer;
 use crate::inference::tokenjuice::generate::GenerateTicket;
-use crate::inference::tokenjuice::AgentTokenjuiceCompression;
 use tinyagents_harness::artifacts::tool_results::{
     apply_per_result_persistence, ArtifactRead, ToolResultArtifactStore,
 };
+use tinyjuice_bus::types::AgentTokenjuiceCompression;
 
 /// TinyJuice's own estimate: `ceil(characters / 4)`, not bytes. Multibyte
 /// content has more bytes than characters, so a byte-based estimate here
@@ -144,8 +144,7 @@ pub(crate) fn is_truncation_exempt(name: &str) -> bool {
 /// [`artifact_read_target`] does.
 ///
 /// Such a result is exempt from the payload summarizer (step 2). `web_fetch`
-/// normally returns HTML as Markdown — `tinyjuice::compressors::html::
-/// html_to_markdown`, which drops scripts and styling — and `raw: true` turns
+/// normally returns HTML as Markdown — TinyJuice’s `ExtractHtml` bus operation, which drops scripts and styling — and `raw: true` turns
 /// that off, so the payload is unconverted markup. Paying a full-price,
 /// *uncached* model call to have an LLM paraphrase minified JS and CSS is the
 /// worst trade in the ladder: one observed `raw: true` fetch of a 183 KB page

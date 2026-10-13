@@ -12,6 +12,7 @@ impl Clone for Config {
     #[inline(never)]
     fn clone(&self) -> Self {
         Self {
+            profile_providers: self.profile_providers.clone(),
             workspace_dir: self.workspace_dir.clone(),
             action_dir: self.action_dir.clone(),
             action_dir_override: self.action_dir_override.clone(),
@@ -89,6 +90,7 @@ impl Clone for Config {
             embeddings_provider: self.embeddings_provider.clone(),
             custom_embeddings: self.custom_embeddings.clone(),
             tokenjuice: self.tokenjuice.clone(),
+            components: self.components.clone(),
             hosting: self.hosting.clone(),
             storage: self.storage.clone(),
             voice_server: self.voice_server.clone(),

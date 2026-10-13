@@ -12,11 +12,9 @@
 //!
 //! # What the member names do *not* depend on
 //!
-//! [`methods`] comes from `tinyconnectors_bus`, an ordinary dependency with no
+//! The method constants come from `tinyconnectors_bus`, an ordinary dependency with no
 //! feature gate. A gates-off build can still name a member and match on the
 //! contract; it just cannot call one.
-
-pub use tinyconnectors_bus::names::methods;
 
 /// Whether a member failure is the module refusing an operation the live route
 /// does not offer.
@@ -130,7 +128,10 @@ where
     Request: serde::Serialize + Send,
     Reply: serde::de::DeserializeOwned,
 {
-    Err(format!("{member}: {WITHOUT_MODULES}"))
+    crate::modules::client::ModuleClient::new(_config.clone())
+        .call::<Reply>("tinyconnectors", member, (_request,))
+        .await
+        .map_err(|error| format!("{member}: {error}; {WITHOUT_MODULES}"))
 }
 
 /// Give an already-serving connector module the route the current config
@@ -187,7 +188,10 @@ where
     Request: serde::Serialize + Send,
     Reply: serde::de::DeserializeOwned,
 {
-    Err(format!("{member}: {WITHOUT_MODULES}"))
+    crate::modules::client::ModuleClient::new(_config.clone())
+        .call::<Reply>("tinyconnectors", member, (_request,))
+        .await
+        .map_err(|error| format!("{member}: {error}; {WITHOUT_MODULES}"))
 }
 
 /// The message a stateless member's failure carries, with the transport layers
@@ -242,7 +246,10 @@ pub async fn call_bare<Reply: serde::de::DeserializeOwned>(
     _config: &crate::config::Config,
     member: &str,
 ) -> Result<Reply, String> {
-    Err(format!("{member}: {WITHOUT_MODULES}"))
+    crate::modules::client::ModuleClient::new(_config.clone())
+        .call::<Reply>("tinyconnectors", member, ())
+        .await
+        .map_err(|error| format!("{member}: {error}; {WITHOUT_MODULES}"))
 }
 
 /// Serializes every test that reaches the connector module.

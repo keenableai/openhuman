@@ -32,6 +32,20 @@ pub(crate) async fn bootstrap_core_runtime(
     };
     let workspace_dir = cfg.workspace_dir.clone();
 
+    // --- Legacy store import ---------------------------------------------
+    // With a storage backend installed, bring the workspace's per-domain
+    // SQLite files (approvals, devices, notifications, task sources) into it
+    // once, read-only, before anything below opens those stores. A no-op
+    // without a backend; failures are logged and retried at the next boot.
+    for report in crate::storage::import::run(&cfg).await {
+        if let Err(error) = report.outcome {
+            log::warn!(
+                "[runtime] legacy {} store import failed: {error:#}",
+                report.domain
+            );
+        }
+    }
+
     // --- Event bus bootstrap ---
     // Ensure the global event bus is initialized (no-op if already done by start_channels).
     crate::core::bus::init().await.expect("bus init");
@@ -165,19 +179,6 @@ pub(crate) async fn bootstrap_core_runtime(
     // surface (`openhuman.cost_get_dashboard`) and `record_provider_usage`
     // share one JSONL-backed store. Idempotent.
     crate::platform::cost::init_global(cfg.cost.clone(), &workspace_dir);
-
-    // --- x402 payment ledger ---
-    // Initializes the JSONL-backed spending ledger for machine-payable API
-    // payments (x402 protocol). Budget defaults can be overridden via
-    // the `openhuman.x402_update_budget` RPC. Gated on the Web3 domain (#4808
-    // review): under `harness()`/`none()` the x402 controllers are absent, so
-    // their ledger must not initialize either.
-    if domains.allows(crate::core::all::DomainGroup::Web3) {
-        let x402_session = format!("x402-{}", uuid::Uuid::new_v4());
-        crate::web3::x402::init_ledger(&workspace_dir, &x402_session);
-    } else {
-        log::debug!("[boot] x402 payment ledger SKIPPED — Web3 domain disabled");
-    }
 
     // --- Sub-agent definition registry bootstrap ---
     // Loads built-in archetype definitions plus any custom TOML files

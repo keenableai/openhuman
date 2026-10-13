@@ -75,6 +75,18 @@ required-features = ["http-server", "bin-tools"]
 # otherwise gate-free target — required-features is the blunt instrument, and
 # it costs the whole target when the gate is off.
 [[test]]
+# Loads the tinydocs module from the linked executable and calls GenerateDocx
+# end to end. Local only: needs `--features linked-modules,documents`.
+name = "tinydocs_linked_e2e"
+path = "../../tests/tinydocs_linked_e2e.rs"
+required-features = ["linked-modules", "documents"]
+
+[[test]]
+name = "tinysearch_module_e2e"
+path = "../../tests/tinysearch_module_e2e.rs"
+required-features = ["modules"]
+
+[[test]]
 # Reproduction of the removed spend cap: needs its own process because the
 # global CostTracker is a `OnceCell`, so a shared `--lib` process makes the
 # spend state order-dependent.
@@ -127,6 +139,11 @@ name = "storage_delegation_e2e"
 path = "../../tests/storage_delegation_e2e.rs"
 
 [[test]]
+# Its own binary: it boots a core with `[components]` switches off.
+name = "components_e2e"
+path = "../../tests/components_e2e.rs"
+
+[[test]]
 name = "embedded_server_shutdown_e2e"
 path = "../../tests/embedded_server_shutdown_e2e.rs"
 
@@ -172,8 +189,7 @@ required-features = ["voice"]
 name = "raw_coverage_all"
 path = "../../tests/raw_coverage_all.rs"
 # The merged raw-coverage target spans ~76 former files, so it reaches the
-# widest surface of any single target: `lettre` (pulled in through the voice
-# gate's `tinychannels/email`) and the local inference download service.
+# widest surface of any single target: voice and the local inference download service.
 required-features = ["voice", "inference"]
 
 # ~20 former `tests/*.rs` targets folded into one binary (one link of the
@@ -221,16 +237,24 @@ name = "composio_list_tools_stack_overflow_regression"
 path = "../../tests/composio_list_tools_stack_overflow_regression.rs"
 
 [[test]]
-name = "cwd_jail_e2e"
-path = "../../tests/cwd_jail_e2e.rs"
-
-[[test]]
 name = "windows_sandbox_env_e2e"
 path = "../../tests/windows_sandbox_env_e2e.rs"
 
 [[test]]
 name = "inference_provider_e2e"
 path = "../../tests/inference_provider_e2e.rs"
+
+[[test]]
+name = "keyring_headless_e2e"
+path = "../../tests/keyring_headless_e2e.rs"
+
+[[test]]
+# Its own binary: it installs the process's global tracing subscriber to prove
+# no log line carries a pinned search key, and drives the process-wide
+# TinySearch module.
+name = "search_pinned_keys_e2e"
+path = "../../tests/search_pinned_keys_e2e.rs"
+required-features = ["modules"]
 
 [[test]]
 name = "keyring_secretstore_e2e"
@@ -279,6 +303,10 @@ path = "../../tests/skills_mcp_registry_live.rs"
 # The only openhuman crate the binary depends on. Every gate below forwards to
 # it, and it forwards down the chain to the core.
 openhuman-rpc = { workspace = true, features = ["server"] }
+# Local-development bridge that links module implementation crates into this
+# executable. Optional and behind the non-product `linked-modules` feature only:
+# no product feature set or other host may name it (`pnpm rust:layout`).
+openhuman-modules-linked = { path = "../openhuman-modules-linked", features = ["all"], optional = true }
 anyhow = "1.0"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"] }
 clap = { version = "4.5", features = ["derive"], optional = true }
@@ -306,6 +334,8 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 tinyinference-llm = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm" }
+# The document-port contract for failure injection in cron storage regressions.
+tinystoragedrivers-core = { path = "../../vendor/tinyagents/vendor/tinystoragedrivers/crates/tinystoragedrivers-core" }
 tinytools = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools" }
 # The completion log a detached sub-agent leaves, for the SaaS delivery-recovery e2e.
 tinyagents-tasks = { path = "../../vendor/tinyagents/crates/tinyagents-tasks" }
@@ -320,20 +350,19 @@ base64 = "0.22"
 flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
-lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 parking_lot = "0.12"
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 tar = "0.4"
 tinyagents-graph = { path = "../../vendor/tinyagents/crates/tinyagents-graph", features = ["sqlite", "storage-drivers"] }
 tinyagents-harness = { path = "../../vendor/tinyagents/crates/tinyagents-harness", features = ["sqlite", "multimodal"] }
 tinyagents-session = { path = "../../vendor/tinyagents/crates/tinyagents-session" }
+tinydocs-bus = { path = "../../vendor/tinydocs/crates/tinydocs-bus" }
+tinysearch-bus = { path = "../../vendor/tinysearch/crates/tinysearch-bus" }
 tinybus = { path = "../../vendor/tinybus/crates/tinybus", default-features = false, features = ["macros", "uds"] }
-tinychannels = { version = "0.1", features = ["relay-websocket"] }
+tinychannels = { version = "0.1", features = ["relay-websocket", "email"] }
 tinyinference-core = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core" }
 tinyinference-local = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-local" }
 tinyinference-voice = { path = "../../vendor/tinyagents/vendor/tinyinference/crates/tinyinference-voice" }
-tinymcp = { path = "../../vendor/tinymcp/crates/tinymcp", default-features = false, features = ["rustls-tls"] }
 tinymcp-bus = { path = "../../vendor/tinymcp/crates/tinymcp-bus", features = ["schemars"] }
 tinytools-agent = { path = "../../vendor/tinyagents/vendor/tinytools/crates/tinytools-agent" }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -348,11 +377,13 @@ wiremock = "0.6"
 
 [features]
 langfuse = ["openhuman-rpc/langfuse"]
+os-keyring = ["openhuman-rpc/os-keyring"]
 # The contributor set: the core's `[features] default` gates (listed, because
 # `openhuman-rpc`'s own default carries only its server and client) plus the
 # Jev ranker. The product lanes pass `--features
 # "$(scripts/ci/product-features.sh)"`; every product gate name resolves here.
 default = [
+    "os-keyring",
     "media",
     "skills",
     "flows",
@@ -381,6 +412,7 @@ web3 = ["openhuman-rpc/web3"]
 # Storage drivers for `[storage] url` (see the core `storage` domain).
 storage-sqlite = ["openhuman-rpc/storage-sqlite"]
 storage-mongodb = ["openhuman-rpc/storage-mongodb"]
+storage-s3 = ["openhuman-rpc/storage-s3"]
 storage-file = ["openhuman-rpc/storage-file"]
 media = ["openhuman-rpc/media"]
 flows = ["openhuman-rpc/flows"]
@@ -396,6 +428,12 @@ scheduler-gate = ["openhuman-rpc/scheduler-gate"]
 crash-reporting = ["openhuman-rpc/crash-reporting"]
 # CLI argument parsing + logger init for `openhuman-fleet`.
 bin-tools = ["dep:clap"]
+# LOCAL DEVELOPMENT ONLY, never a product gate. Links the module implementation
+# crates (`openhuman-modules-linked`) into this binary and its tests and
+# registers them at boot, so `OPENHUMAN_MODULE_SOURCE=linked` serves modules from
+# the executable. Absent from `scripts/ci/product-features.txt` and from the
+# app manifest; CI never enables it.
+linked-modules = ["modules", "dep:openhuman-modules-linked"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }

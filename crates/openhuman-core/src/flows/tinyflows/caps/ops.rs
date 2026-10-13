@@ -12,8 +12,6 @@
 
 use std::sync::Arc;
 
-use crate::flows::tinyflows::checkpoint_sqlite::SqliteCheckpointer;
-use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tinyflows::caps::*;
@@ -144,10 +142,10 @@ async fn flow_tool_allowed(
     slug: &str,
     connected_toolkits: Option<&[String]>,
 ) -> bool {
-    use crate::integrations::composio::ops::load_user_scope_pref;
-    use crate::integrations::composio::providers::{
+    use crate::integrations::composio::contract::{
         catalog_for_toolkit, classify_unknown, find_curated, toolkit_from_slug,
     };
+    use crate::integrations::composio::ops::load_user_scope_pref;
 
     let Some(toolkit) = toolkit_from_slug(slug) else {
         tracing::debug!(target: "flows", %slug, "[flows] tool_call curation: reject — slug has no extractable toolkit prefix");
@@ -214,7 +212,7 @@ async fn flow_tool_allowed(
 /// offline (a registry lookup) so the common cataloged-toolkit path never pays
 /// for a connected-set fetch.
 fn slug_needs_connected_set(slug: &str) -> bool {
-    use crate::integrations::composio::providers::{catalog_for_toolkit, toolkit_from_slug};
+    use crate::integrations::composio::contract::{catalog_for_toolkit, toolkit_from_slug};
     match toolkit_from_slug(slug) {
         Some(toolkit) => catalog_for_toolkit(&toolkit).is_none(),
         None => false,
@@ -231,24 +229,22 @@ fn slug_needs_connected_set(slug: &str) -> bool {
 /// nothing to go on (the caller then fails closed).
 async fn connected_toolkit_slugs(config: &Config) -> Option<Vec<String>> {
     use crate::integrations::composio::{
-        cached_active_integrations_including_expired, fetch_connected_integrations_status,
+        cached_active_integrations, fetch_connected_integrations_status,
         FetchConnectedIntegrationsStatus,
     };
 
     let integrations = match fetch_connected_integrations_status(config).await {
         FetchConnectedIntegrationsStatus::Authoritative(v) => v,
-        FetchConnectedIntegrationsStatus::Unavailable => {
-            match cached_active_integrations_including_expired(config) {
-                Some(v) => {
-                    tracing::warn!(target: "flows", "[flows] connected-toolkit lookup: backend unavailable — using last-known (possibly stale) cached connections for the tool_call allowlist");
-                    v
-                }
-                None => {
-                    tracing::warn!(target: "flows", "[flows] connected-toolkit lookup: backend unavailable and no cached snapshot — connected-toolkit allowlist is empty this call");
-                    return None;
-                }
+        FetchConnectedIntegrationsStatus::Unavailable => match cached_active_integrations(config) {
+            Some(v) => {
+                tracing::warn!(target: "flows", "[flows] connected-toolkit lookup: backend unavailable — using last-known (possibly stale) cached connections for the tool_call allowlist");
+                v
             }
-        }
+            None => {
+                tracing::warn!(target: "flows", "[flows] connected-toolkit lookup: backend unavailable and no cached snapshot — connected-toolkit allowlist is empty this call");
+                return None;
+            }
+        },
     };
 
     Some(
@@ -264,7 +260,7 @@ async fn connected_toolkit_slugs(config: &Config) -> Option<Vec<String>> {
 /// [`CommandClass`] the autonomy-tier gate ([`enforce_node_tier_gate`])
 /// evaluates it under.
 ///
-/// Reuses [`curated_scope_for`](crate::integrations::composio::providers::curated_scope_for),
+/// Reuses [`curated_scope_for`](crate::integrations::composio::contract::curated_scope_for),
 /// the same catalog walk `composio::ops`'s `gated_tools` hints use — a
 /// registered native provider's `curated_tools()` first, then the static
 /// `catalog_for_toolkit` fallback. **Fail-safe by construction:** only a
@@ -277,7 +273,7 @@ async fn connected_toolkit_slugs(config: &Config) -> Option<Vec<String>> {
 /// (prompts under Supervised/Full, blocks under ReadOnly).
 ///
 /// Deliberately does **not** fall back to
-/// [`classify_unknown`](crate::integrations::composio::providers::classify_unknown)
+/// [`classify_unknown`](crate::integrations::composio::contract::classify_unknown)
 /// for uncurated slugs: that heuristic is tuned for the *curation*
 /// allowlist (`flow_tool_allowed`'s Path B — "is this slug even visible to
 /// the agent"), not for deciding whether a real side-effecting call skips
@@ -288,7 +284,7 @@ async fn connected_toolkit_slugs(config: &Config) -> Option<Vec<String>> {
 /// from what actually gates (a parallel re-implementation would list
 /// permissions that never prompt, or miss ones that do).
 pub(crate) async fn classify_composio_action_for_tier(slug: &str) -> CommandClass {
-    use crate::integrations::composio::providers::{curated_scope_for, ToolScope};
+    use crate::integrations::composio::contract::{curated_scope_for, ToolScope};
 
     match curated_scope_for(slug) {
         Some(ToolScope::Read) => CommandClass::Read,
@@ -415,7 +411,15 @@ pub(crate) async fn preflight_composio_args(
     // (1) Static rules — the same validation the Composio dispatch runs, hoisted
     // ahead of it. Only the `Err` matters here; the normalized arguments it
     // returns are recomputed (and used) at dispatch.
-    if let Err(e) = tinyconnectors::execute::prepare_execute_arguments(slug, Some(args.clone())) {
+    if let Err(e) = crate::integrations::composio::processing::prepare(
+        config,
+        slug,
+        Some(args.clone()),
+        None,
+        None,
+    )
+    .await
+    {
         tracing::warn!(target: "flows", %slug, error = %e, "[flows] preflight: static arg rule rejected the call — failing before dispatch");
         return Err(EngineError::Capability(format!("tool_call `{slug}`: {e}")));
     }
@@ -500,7 +504,7 @@ pub(crate) fn reject_unsuccessful_composio_response(
 /// rather than a false "Completed".
 pub(crate) fn reject_failed_native_tool_result(
     slug: &str,
-    result: &crate::skills::types::ToolResult,
+    result: &tinytools::ToolResult,
 ) -> Result<()> {
     if !result.is_error {
         return Ok(());
@@ -534,8 +538,8 @@ pub(crate) fn reject_failed_native_tool_result(
 /// binds with the same `=nodes.<id>.item.json.<field>` shape used everywhere
 /// else. Anything else (plain text, or mixed/multiple blocks) collapses to
 /// `{ "text": <output()> }` so there is always a predictable field to bind.
-pub(crate) fn native_tool_payload(result: &crate::skills::types::ToolResult) -> Value {
-    use crate::skills::types::ToolContent;
+pub(crate) fn native_tool_payload(result: &tinytools::ToolResult) -> Value {
+    use tinytools::ToolContent;
     match result.content.as_slice() {
         [ToolContent::Json { data }] => data.clone(),
         _ => json!({ "text": result.output() }),
@@ -657,35 +661,20 @@ pub fn build_capabilities(config: Arc<Config>, state_namespace: impl Into<String
 }
 
 /// Opens the durable, cross-process checkpointer a `flows_run` uses via
-/// `tinyflows::engine::run_with_checkpointer` — this host's
-/// [`SqliteCheckpointer`], stored under `<workspace_dir>/flows/checkpoints.db`,
-/// or, when the host configured a storage backend ([`crate::storage`]),
-/// `tinyflows_drivers::DriverCheckpointer` over it in the acting agent's scope.
+/// `tinyflows::engine::run_with_checkpointer`:
+/// `tinyflows_drivers::DriverCheckpointer` over the flow catalog's storage
+/// ([`crate::flows::store`]) in the acting agent's scope.
 ///
-/// It became host-owned when tinyflows vendored its state-graph runtime and
-/// dropped the SQLite backend with it (tinyflows PR #43). The port keeps the
-/// schema and SQL byte-identical, so an existing `checkpoints.db` — and any
-/// run interrupted before the upgrade — resumes unchanged. See
-/// [`super::super::checkpoint_sqlite`].
+/// tinyflows no longer has a SQLite checkpointer; the `checkpoints.db` it wrote
+/// is imported once, so a run interrupted before the upgrade still resumes.
 pub fn open_flow_checkpointer(
     config: &Config,
 ) -> anyhow::Result<Arc<dyn tinyflows::engine::Checkpointer<serde_json::Value>>> {
-    if let Some(scoped) = crate::storage::current_scoped()? {
-        tracing::debug!(target: "flows", "[flows] opening checkpointer on the storage backend");
-        return Ok(Arc::new(tinyflows_drivers::DriverCheckpointer::<
-            serde_json::Value,
-        >::new(Arc::clone(scoped.documents()))));
-    }
-    let db_path = config.workspace_dir.join("flows").join("checkpoints.db");
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create flows directory: {}", parent.display()))?;
-    }
-    tracing::debug!(target: "flows", db = %db_path.display(), "[flows] opening checkpointer");
-    Ok(Arc::new(
-        SqliteCheckpointer::<serde_json::Value>::open(&db_path)
-            .with_context(|| format!("Failed to open flows checkpointer: {}", db_path.display()))?,
-    ))
+    let scoped = crate::flows::store::scoped(config)?;
+    tracing::debug!(target: "flows", "[flows] opening checkpointer on the flow storage");
+    Ok(Arc::new(tinyflows_drivers::DriverCheckpointer::<
+        serde_json::Value,
+    >::new(Arc::clone(scoped.documents()))))
 }
 
 #[cfg(test)]

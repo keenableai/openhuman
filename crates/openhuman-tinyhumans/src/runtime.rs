@@ -151,6 +151,10 @@ impl RuntimeBuilder {
         services(services: ServiceSet)
     );
     forward!(
+        /// See [`openhuman_embed::RuntimeBuilder::defer_services`].
+        defer_services()
+    );
+    forward!(
         /// See [`openhuman_embed::RuntimeBuilder::domains`].
         domains(domains: DomainSet)
     );
@@ -281,6 +285,8 @@ impl RuntimeBuilder {
     }
 
     /// Connect, then boot the runtime.
+    // Preserve the public error wrapper rather than box its `RuntimeError`.
+    #[allow(clippy::result_large_err)]
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         let inner = self.connect()?;
         log::debug!("[tinyhumans] building embed runtime with backend transport");

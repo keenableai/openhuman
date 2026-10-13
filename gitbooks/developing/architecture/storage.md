@@ -62,6 +62,31 @@ In SaaS mode a call with no profile is refused instead of falling into a bucket 
 
 A backend decides how it enforces the scope. SQLite and the file driver keep each scope's data apart, and `local` is the scope a single-user install uses. MongoDB injects a scope key into every filter and every index prefix.
 
+### Process state
+
+The [process-state inventory](process-state.md) classifies the named shared-core
+singleton candidates and records their tenant, durability and routing boundaries.
+It also identifies pending regressions and implementation work.
+
+### Process caches
+
+The connected-integration catalog belongs to the calling profile, or to the
+operator in single-user mode. Agents using that operator's same configuration
+and credentials share it. Its cache key
+also binds the configuration, backend endpoint and credential identity, using
+digests rather than storing those secrets in the key. Identical service
+credentials do not make two profiles share a snapshot.
+
+| Cache                | Isolation and lifetime                                                                                                                                                                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INTEGRATIONS_CACHE` | Per-process snapshots keyed by profile/operator scope and credential identity. Invalidation and connection reconciliation affect only the calling scope. Entries are reconstructed from the backend; they are not durable records. |
+| `CACHE_GENERATIONS`  | Per-process epochs for the same profile/operator scopes. Invalidation fences that scope's in-flight fetches without rejecting another profile's completed fetch.                                                                   |
+| Storage `KEYS`       | The process master-key provider. Each secret operation derives its data key from the captured native storage scope; the cached value is not a tenant data key. Changing the master source requires a new process.                  |
+
+SaaS work without a profile cannot read, populate, reconcile or invalidate the
+integration cache. The Settings connection poll keeps its calling context when
+it starts a background refresh with `spawn_scoped`.
+
 ### Background work
 
 Background work runs under the process default context, which names no agent, and on its own would only see `local`. `storage::agents` closes the gap. Agents are known when they are live (`AgentContextRegistry`) or when an earlier process recorded their id in the `local` scope (`storage_agents`). `for_each_scope` runs a step once for `local` and once under each known agent. The cron scheduler's agent pass (`cron::scheduler::tick_live_agents`, driven in tests through the public `cron::scheduler::run_live_agent_pass`) runs each live agent's due jobs under that agent's own context, so their results are recorded in the agent's own scope. A recorded agent that is not live waits until it is live again, because its jobs need its host tools and prompt.
@@ -78,7 +103,19 @@ On a shared backend (MongoDB) other processes may write the same records, so boo
 | `file:<dir>`       | `<dir>/scopes/<scope>/docs/<collection>/<id>.json` for documents, with collection metadata in `<dir>/_meta/collections/<collection>.json`. Streams are JSONL and blobs are raw files under the same scope directory. |
 | `mongodb://…/<db>` | One database. Each named database is a collection prefix, and every record carries its scope.                                                                                                                        |
 
-Without a URL, the classic layout is unchanged: per-domain SQLite databases (`approval/approval.db`, `devices/devices.db`, `notifications/notifications.db`, `task_sources/sources.db`, `cron/jobs.db`, `flows/flows.db`, `graph_checkpoints.db`), JSON and JSONL files, and the OS keyring or `secrets.enc`. Records written to a configured backend are not copied back to those files. The domain stores do not import their files either, with one exception: credentials. On first read with a backend installed, the auth-profile and HTTP-credential stores copy the records in their files into the backend, and the keyring adopts a secret it finds in the process backend. The source files are left untouched.
+Without a URL, the classic layout holds for the other domains: per-domain SQLite databases (`approval/approval.db`, `devices/devices.db`, `notifications/notifications.db`, `task_sources/sources.db`, `graph_checkpoints.db`), JSON and JSONL files, and the OS keyring or `secrets.enc`. Cron jobs and the flow catalog are the exception: they live in the document databases `cron/schedule.db` and `flows/catalog.db`, beside the retained legacy `cron/jobs.db`, `flows/flows.db` and `flows/checkpoints.db`, which are no longer read after the one-time import. Records written to a configured backend are not copied back to those files. On first read with a backend installed, the auth-profile and HTTP-credential stores copy the records in their files into the backend, and the keyring adopts a secret it finds in the process backend. The source files are left untouched.
+
+### Importing the legacy small stores
+
+When a backend is installed, the core runs a one-time import at boot (`storage::import`, before any domain store opens). It covers the four small stores that keep one SQLite file each: approvals (`approval/approval.db`), devices (`devices/devices.db`), notifications (`notifications/notifications.db`) and task sources (`task_sources/sources.db`). The import is read-only. It copies the file, with its `-wal` and `-shm` companions, into a scratch directory and reads the copy, so the legacy reader's schema migration and the SQLite driver's table declaration never touch the real file. Both on-disk shapes are read: the original tables, and the driver document tables an earlier default wrote into the same file (those records win an id clash, being newer). Notifications for the core are re-filed under the real workspace's key.
+
+Every record is written with an absent-only precondition, so an existing record is never overwritten. When a domain's records are written, a marker document (`storage_import/<domain>@<workspace digest>`, local scope) is stored, and a later boot does nothing. A deleted record is therefore not brought back from the untouched file. A failed import leaves no marker and is retried at the next boot; boot continues either way. SaaS processes have no workspace files and import nothing.
+
+The tinyflows stores are imported the same way with TinyFlows' own reader (`tinyflows-import`): cron jobs with their runs and policies (`cron/jobs.db`, and each agent's `agents/<id>/cron/jobs.db`, filed under that agent's scope), and the flow catalog with its drafts and checkpoints (`flows/flows.db`, `flows/drafts/*.json`, `flows/checkpoints.db`). Records keep their ids, markers are `cron`, `cron/<agent>` and `flows`, and a build without the `flows` gate imports no cron jobs.
+
+TinyFlows has no storage backend of its own any more, so these stores are on the ports whatever the URL says. With no URL, and under the `classic` opt-out, they live in SQLite document databases of their own (`cron/schedule.db`, `agents/<id>/cron/schedule.db`, `flows/catalog.db`), and the first use of each imports the legacy files into it. The legacy files are never modified, and the old `jobs.db` and `flows.db` are no longer written.
+
+Not yet imported: sessions and transcripts, whose format belongs to TinyAgents.
 
 Secrets with a backend installed are encrypted documents in the current storage scope: the acting agent's scope on a desktop or CLI host, and the profile's scope under SaaS, where every agent in one profile shares the profile's credentials and data key. Each scope's data key is derived with HKDF-SHA256 from the keyring master key (`OPENHUMAN_KEYRING_MASTER_KEY` or `_FILE`, else the OS keychain), and with no master key they fail closed. The config encryption key stays on the process keyring because `config.toml` is loaded before any agent acts.
 

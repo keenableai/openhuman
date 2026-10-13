@@ -3,10 +3,7 @@
 //! Split into submodules; this module re-exports the main `Config` and all public types.
 
 pub mod cloud_providers;
-pub use cloud_providers::{
-    generate_provider_id, is_slug_reserved, migrate_legacy_fields, AuthStyle, CloudProviderCreds,
-    CloudProviderType,
-};
+pub use cloud_providers::{generate_provider_id, is_slug_reserved, AuthStyle, CloudProviderCreds};
 pub mod ephemeral_route;
 pub use ephemeral_route::{EphemeralRoute, EPHEMERAL_ROUTE_SLUG};
 mod agent;
@@ -27,6 +24,8 @@ mod defaults;
 mod dictation;
 mod hooks;
 pub use hooks::HooksConfig;
+pub mod components;
+pub use components::ComponentsConfig;
 pub mod hosting;
 pub use hosting::HostingConfig;
 pub mod storage;
@@ -100,7 +99,9 @@ pub use memory::{
     MemoryEngineSettings, MemoryLayoutMode, MemoryRecallConfig, MemorySourceConfig,
     MemorySourceKind, MEMORY_CORTEXDB_KEY_NAME,
 };
-pub use modules::{ModuleOverride, ModulesConfig};
+pub use modules::{
+    module_source_env_for, ModuleOverride, ModuleSourceMode, ModulesConfig, MODULE_SOURCE_ENV,
+};
 pub use observability::{AgentTracingBackend, AgentTracingConfig, ObservabilityConfig};
 pub use privacy::{PrivacyConfig, PrivacyMode};
 pub use proxy::{
@@ -121,12 +122,13 @@ pub use tools::{
     ComposioHostCredential, CurlConfig, GitbooksConfig, HttpHeader, HttpRequestConfig,
     IntegrationToggle, IntegrationsConfig, LegacySearchInputs, McpAuthConfig, McpClientConfig,
     McpClientIdentityConfig, McpServerConfig, McpToolExposure, MultimodalConfig,
-    MultimodalFileConfig, SearchConfig, SearchEngineCredentials, SearchPresentation,
-    SearchProviderSettings, SearchRoute, SearxngConfig, SecretsConfig, SeltzConfig,
-    WebSearchConfig, COMPOSIO_MODE_BACKEND, COMPOSIO_MODE_DIRECT, COMPOSIO_MODE_DISABLED,
-    MANAGED_SEARCH_PROVIDERS, SEARCH_ENGINE_BRAVE, SEARCH_ENGINE_DISABLED, SEARCH_ENGINE_EXA,
-    SEARCH_ENGINE_MANAGED, SEARCH_ENGINE_PARALLEL, SEARCH_ENGINE_QUERIT, SEARCH_ENGINE_TAVILY,
-    SEARCH_PROVIDERS, SEARCH_ROLES, SEARCH_ROLE_ANSWER, SEARCH_ROLE_CONTENTS, SEARCH_ROLE_SEARCH,
+    MultimodalFileConfig, PresentationMode, ProviderRoute, SearchConfig, SearchEngineCredentials,
+    SearchHostCredential, SearchProviderSettings, SearxngConfig, SecretsConfig, SeltzConfig,
+    UnknownKeyedSearchProvider, WebSearchConfig, COMPOSIO_MODE_BACKEND, COMPOSIO_MODE_DIRECT,
+    COMPOSIO_MODE_DISABLED, MANAGED_SEARCH_PROVIDERS, SEARCH_ENGINE_BRAVE, SEARCH_ENGINE_DISABLED,
+    SEARCH_ENGINE_EXA, SEARCH_ENGINE_MANAGED, SEARCH_ENGINE_PARALLEL, SEARCH_ENGINE_QUERIT,
+    SEARCH_ENGINE_TAVILY, SEARCH_PROVIDERS, SEARCH_ROLES, SEARCH_ROLE_ANSWER, SEARCH_ROLE_CONTENTS,
+    SEARCH_ROLE_SEARCH,
 };
 pub use update::{UpdateConfig, UpdateRestartStrategy};
 pub use web_chat_config::WebChatConfig;

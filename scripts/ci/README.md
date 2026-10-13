@@ -11,6 +11,7 @@ authoritative spec; this is an index so a CI failure log points somewhere.
 | [`check-crate-chain.mjs`](check-crate-chain.mjs) | The crate chain holds: each OpenHuman crate's normal dependencies name only the layer below it (core: none; embed: core; tinyhumans: embed; rpc: tinyhumans; app/cli/tui: rpc), and host `src/` never names `__host`, `core_host` or `openhuman_core::`. Dev-dependencies are exempt. Runs as part of `pnpm rust:layout`. |
 | [`product-features.txt`](product-features.txt) / [`product-features.sh`](product-features.sh) | Source of truth for the shipped desktop product's Cargo feature gates, distinct from `[features] default` (the contributor build). The `.sh` prints them comma-separated for `cargo --features "$(scripts/ci/product-features.sh)"`. |
 | [`check-module-pins.mjs`](check-module-pins.mjs) + [`module-pin-exemptions.json`](module-pin-exemptions.json) | A loadable module's registry pin ([`crates/openhuman-core/src/modules/registry.rs`](../../crates/openhuman-core/src/modules/registry.rs)) and its `vendor/*` submodule pin must describe the same release (openhuman#5727). The exemptions file records known, expected drift, not a way to silence the gate. Logic lives in [`scripts/lib/module-pins.mjs`](../lib/module-pins.mjs). |
+| [`check-ci-module-source.mjs`](check-ci-module-source.mjs) | CI selects the pinned, digest-checked release only: no module-source environment override, no linked or source mode, no non-product linked feature, and no call to the local module build script. Every module, tinyconnectors included, is downloaded from its release (#7618); nothing is compiled from source in CI. |
 | [`check-submodule-monotonic.mjs`](check-submodule-monotonic.mjs) | A `vendor/*` submodule pin may never move backwards onto a commit that is an ancestor of what the base branch already has. |
 | [`check-toolchain-image.mjs`](check-toolchain-image.mjs) | The CI image's toolchain, the version-pinned `dtolnay/rust-toolchain@<version>` workflow steps, and [`.github/Dockerfile`](../../.github/Dockerfile) all match the channel pinned in [`rust-toolchain.toml`](../../rust-toolchain.toml). |
 | [`rust-coverage.sh`](rust-coverage.sh) | Runs the complete product-feature Rust suite under `cargo-llvm-cov`, including every core integration target and the root Rust support crates. |
@@ -24,8 +25,21 @@ changed-line diff-cover check (>= 80%) in `ci-lite.yml`.
 
 ## Running locally
 
-Only `check-openhuman-rust-layout.mjs` and `check-crate-chain.mjs` are wired to a pnpm script
-(`pnpm rust:layout`); the rest are invoked directly, e.g.
+The module boundary audit (`pnpm rust:module-boundaries`) resolves the root and
+excluded desktop host with all features, traversing normal and build edges on
+all platforms. It also resolves each bus contract independently with default
+and all features, outside the owning module workspace, to avoid feature
+unification with implementation crates. It runs in the Rust scripts lane.
+Temporary exceptions in [`module-boundaries.json`](module-boundaries.json) must
+have reasons; unused exceptions fail the audit. A passing transitional audit is
+not a completed migration. `pnpm rust:module-boundaries:complete` additionally
+rejects all exceptions and pending contracts. Cargo failure is an audit failure.
+Generated probes and lockfiles stay in the checkout's `target/module-boundaries/`.
+
+`check-openhuman-rust-layout.mjs` and `check-crate-chain.mjs` run through
+`pnpm rust:layout`. The module-boundary audit has the two pnpm commands above,
+and the ambient-access ratchet runs through `pnpm saas:ambient`. Other gates
+are invoked directly, e.g.
 `node scripts/ci/check-feature-forwarding.mjs` or
 `bash scripts/ci/orch-ip-gate.sh`, and can be run the same way locally. Every
 gate here runs from `.github/workflows/ci-lite.yml`; `ci-full.yml` does not

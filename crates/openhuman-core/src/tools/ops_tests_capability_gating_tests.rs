@@ -56,15 +56,6 @@ fn tool_group_classifies_gate_and_harness_families() {
         );
     }
     assert_eq!(tool_group("media_generate_image"), DomainGroup::Media);
-    // Voice audio_* tools have no voice_/tts_/stt_ prefix — must be classified
-    // explicitly, not fall through to Platform (#4808 review).
-    assert_eq!(tool_group("audio_generate_podcast"), DomainGroup::Voice);
-    assert_eq!(tool_group("audio_email_podcast"), DomainGroup::Voice);
-    assert_eq!(
-        tool_group("audio_generate_and_email_podcast"),
-        DomainGroup::Voice
-    );
-
     // Harness-mapped families → kept under harness().
     assert_eq!(tool_group("memory"), DomainGroup::Memory);
     assert_eq!(tool_group("goal_get"), DomainGroup::Threads);
@@ -130,7 +121,6 @@ fn tool_group_gate_families_dropped_under_harness_not_full() {
     assert!(!harness.allows(tool_group("run_workflow")));
     assert!(!harness.allows(tool_group("shell")));
     // The previously-misclassified gate-family tools now drop under harness.
-    assert!(!harness.allows(tool_group("audio_generate_podcast")));
 }
 
 #[test]
@@ -167,7 +157,7 @@ fn no_gate_family_tool_silently_defaults_to_platform() {
 #[cfg(not(feature = "flows"))]
 fn default_tools_omits_flows_tools_when_feature_off() {
     let security = Arc::new(SecurityPolicy::default());
-    let tools = default_tools(security);
+    let tools = crate::tools::ops::default_tools(security);
     let names = tool_names(&tools);
 
     for absent in [

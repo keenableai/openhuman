@@ -8,7 +8,7 @@ binary: `tinycomputer`, `tinysearch`, `tinydocs`, `tinywallet`, `tinyjuice`,
 GitHub release, checks it against a digest compiled into this crate, lets
 tinybus admit it, attaches it to a private in-process broker, and then calls
 it like any other bus service. Domains reach a module through the per-module
-host files here ([`documents.rs`](./documents.rs), [`wallet.rs`](./wallet.rs), [`voice.rs`](./voice.rs), ...) rather than
+host files here ([`documents.rs`](./documents.rs), [`wallet.rs`](./wallet.rs), [`voice.rs`](./voice.rs), [`accessibility.rs`](./accessibility.rs), ...) rather than
 talking to tinybus themselves.
 
 The `//!` comments in [`mod.rs`](mod.rs), [`host.rs`](host.rs) and
@@ -110,9 +110,9 @@ The resolution itself (`ops::resolve`) tries the cheapest source first:
   already serving on the broker?          (search path at boot, earlier load)
         | no
         v
-  local override?                         [[modules.overrides]] id = "..."
-        | no                              or TINYSEARCH_TEST_MODULE /
-        v                                 TINYCONNECTORS_TEST_MODULE
+  configured source?                      [modules] source, per-module override
+        | release (default)               or OPENHUMAN_MODULE_SOURCE[_<ID>];
+        v                                 `path` override -> local file
   module search path?                     OPENHUMAN_MODULE_PATH, then
         | no                              platform data dirs (tinybus)
         v
@@ -125,6 +125,83 @@ The resolution itself (`ops::resolve`) tries the cheapest source first:
         v
   prune_stale_versions() removes older cached versions of this module
 ```
+
+#### Module source
+
+`[modules] source` (`release` | `linked` | `source`, default `release`) decides
+where a module comes from; `[[modules.overrides]]` entries take exactly one of
+`path` (a local library, as before) or `source` (a mode for that id), and a
+per-module entry beats the global mode. `OPENHUMAN_MODULE_SOURCE` sets the
+global mode and `OPENHUMAN_MODULE_SOURCE_<ID>` (id upper-cased) one module.
+
+| Source | What serves the module | Used by |
+| --- | --- | --- |
+| `release` (default) | The pinned, digest-checked GitHub release | CI, shipped builds, everyone by default |
+| `linked` | A factory registered by `crates/openhuman-modules-linked` (non-product `linked-modules` feature of `openhuman-cli`) | Local development and local tests only |
+| `source` | A library built from the vendored gitlink by `scripts/modules/build.mjs` | Local development and local tests only |
+
+Resolution order for one id: a per-module `path` override or
+`OPENHUMAN_MODULE_SOURCE_<ID>` first, then the global `[modules] source` /
+`OPENHUMAN_MODULE_SOURCE`, then `release`. **CI and shipped builds are
+`release` only**: `check-ci-module-source.mjs` enforces it, and the product
+feature list never contains `linked-modules`.
+
+- `release`: the chain below, pinned and digest-checked. The only mode CI and
+  shipped builds use; `scripts/ci/check-ci-module-source.mjs` (CI Lite) fails
+  if a workflow or CI script sets any other.
+- `linked`: the module linked into the running executable. The core exposes
+  only the seam (`modules::linked::register_linked(id, factory)`, re-exported as
+  `openhuman_rpc::embed::modules::register_linked`); the crate
+  `crates/openhuman-modules-linked` is the only place module implementation
+  crates are linked, and `install()` registers one factory per enabled module
+  feature. `ops::resolve` attaches the factory's `LinkedModule` through
+  `ModuleHost::attach_linked_with_config` with the same `module_config` a
+  released module gets (the executable's digest is the attestation). Only
+  `openhuman-cli` can reach the crate, as an optional dependency behind the
+  non-product `linked-modules` feature (`cargo run -p openhuman-cli --features
+  linked-modules`, then `OPENHUMAN_MODULE_SOURCE=linked`). tinybus never unloads
+  a module, so a process serves an id from one source only. See the crate docs
+  for which modules can be linked at the current vendor pins.
+- Pin status: `node scripts/modules/pin-status.mjs` compares each gitlink with
+  its registry `version` (in sync, ahead, behind/diverged, exempt). With
+  `OPENHUMAN_MODULE_PIN_AHEAD` set (`--print-env` prints it), a debug build logs
+  one warning per id when it serves a `linked` or `source` module whose gitlink
+  is ahead of its pin. `scripts/modules/release-and-repin.mjs <id>` publishes
+  the release and re-pins from its `checksum.toml`; the strict
+  `check-module-pins.mjs` is unchanged.
+- `source`: a library built from the module's vendored gitlink by
+  `node scripts/modules/build.mjs <id|all>` (the recipe is the record's
+  `SourceSpec`: submodule, manifest, package, `lib_name`, features). The build
+  stages `<out>/<id>/<library>` plus a `modules.toml` holding the file's sha256
+  as operator trust, and prints `OPENHUMAN_MODULE_SOURCE_DIR=<out>` and one
+  `OPENHUMAN_MODULE_SOURCE_<ID>=source` line per module. `ops::resolve` loads
+  `<OPENHUMAN_MODULE_SOURCE_DIR>/<id>/<library>` through the same local-file
+  path as an explicit `path` override, so no new loader exists. The digest is
+  never written to `records_*.rs`: registry pins come from published releases
+  only. Builds are cached by (submodule tree, rustc, target, profile, features).
+
+Local-dev recipe (never in CI):
+
+```bash
+# 1. Edit the module in vendor/<submodule> on its branch.
+# 2a. source: build it and point the core at the artifact.
+eval "$(node scripts/modules/build.mjs tinydocs --print-env)"
+OPENHUMAN_MODULE_SOURCE=source ./target/debug/openhuman-core serve
+# 2b. linked: link it into the CLI.
+OPENHUMAN_MODULE_SOURCE=linked cargo run -p openhuman-cli --features linked-modules -- serve
+# 3. Check the pin before pushing; a debug core warns once per id when the
+#    gitlink is ahead of the registry pin.
+eval "$(node scripts/modules/pin-status.mjs --print-env)"
+# 4. Release and re-pin (asks before publishing).
+node scripts/modules/release-and-repin.mjs tinydocs --bump patch
+```
+
+For local development and local tests only. When `linked` or `source` cannot be
+honoured (no factory registered, no built artifact), the module is served from
+`release`, one `warn` line names the id and both modes, and
+`ModuleStatus.detail` carries the reason. `modules.list` reports the serving
+source in `source` (`release`, `linked`, `source`, `local_file`); it never
+carries a path. No per-module artifact environment variable is read any more.
 
 Inside the release cache, tinybus looks for the archive in the bundled
 directory first, then in `install_dir/<id>/<version>/<host_key>`, and
@@ -180,6 +257,15 @@ The host files for those three modules fingerprint the configuration and call
 a sign-out reaches a module that is already serving. Secrets travel only in
 that configuration, never in an ordinary method call or an RPC reply.
 
+### Disabled components
+
+`registry::COMPONENT_OF` maps every module id to its `[components]` switch
+(`registry_contract_tests` covers every record). `ops::ensure_loaded*` refuses
+a record whose component is off with `LoadError::Disabled` before any claim,
+download or `dlopen`; `modules.list` reports `ModuleState::Disabled`; boot skips
+the module and `search_path::load_enabled` leaves its search-path artifact
+unopened. See [components](../../../../gitbooks/developing/components.md).
+
 ### Boot
 
 `boot::load_declared_modules` runs as a background bootstrap job
@@ -210,23 +296,30 @@ download, its `dlopen`, or its resident memory.
 
 | Path | Module | What it does |
 | --- | --- | --- |
-| [`documents.rs`](documents.rs) | `tinydocs` | `generate_docx`, `generate_pptx`, `extract_text`, `extract_document`, `render_pdf`. Inbound bytes ride a tinybus stream; produced documents are held by the module and pulled with `ReadOutput`, then released. Feature `documents`. |
-| [`wallet.rs`](wallet.rs) | `tinywallet` | `derive_account`, `sign_transaction_in_module`, `sign_message`, `export_key`. Key material goes only to an attested module whose attested digest is one the registry pinned (`attested_proxy`). Feature `web3`. |
+| [`documents.rs`](documents.rs) | `tinydocs` | `generate_docx`, `generate_pptx`, `extract_text`, bounded `extract_document`, complete `convert_markdown`, `inspect_image`, and `render_pdf`. Inbound bytes ride a TinyBus stream; held results are pulled with `ReadOutput` and released. Feature `documents`. |
+| [`wallet.rs`](wallet.rs) | `tinywallet` | Typed wallet, Web3, ERC-20 encoding, and x402 calls. Key material goes only to confidential calls to an attested module whose digest is pinned by the registry (`attested_proxy`). Feature `web3`. |
 | [`voice.rs`](voice.rs) | `tinyvoice` | Intent routing, command extraction, wake-word and hallucination checks, capture preparation, WAV encoding, frame energies, and a `VadSession` driven from the always-on capture loop. Every call returns a `VoiceCallError` the caller falls back from. Feature `voice`. |
 | [`desktop.rs`](desktop.rs) | `tinycomputer` | The shared proxy for TinyComputer: loads it with an 8 second bound, reinitializes it when its configuration fingerprint changes, and exposes `call`, `permissions`, `state`, `jev_ready`. |
 | [`computer_config.rs`](computer_config.rs) | `tinycomputer` | The private configuration: `jev` (decision model), `planner` (planner, rescue and output models), `browser` (Chrome path), `trace_path`. Rebuilt from `[computer]` and stored credentials on every call; `OPENHUMAN_COMPUTER_TRACE` turns tracing on. |
 | [`computer.rs`](computer.rs) | `tinycomputer` | `status` for the Computer settings page: lifecycle state, configured routes, and optionally what the module reports through `Describe`. |
-| [`browser.rs`](browser.rs) | `tinycomputer` | `BrowserClient` for the `Browser*` members, over the desktop proxy, plus the shared website policy. |
-| [`browser_task.rs`](browser_task.rs) | `tinycomputer` | Browser tasks over `StartTask` / `AwaitTask` / `ContinueTask`: `start`, `wait`, `resume`, `cancel`, `report`. The host keeps the policy (surfaces, origins, action budget, approvals). |
+| [`browser.rs`](browser.rs) | `tinycomputer` | `BrowserClient` for the `Browser*` members, over the desktop proxy, plus the shared website policy: "Allow all" (the list's `*`) lets the browser open any public site, private and local addresses still refused. |
+| [`browser_task.rs`](browser_task.rs) | `tinycomputer` | Browser tasks over `StartTask` / `AwaitTask` / `ContinueTask`: `start`, `wait`, `resume`, `cancel`, `report`. The host keeps the policy (surfaces, origins, action budget, approvals) and sends Browser Control's Chrome path, and in persistent mode its profile folder, with every task, read from the settings each time. A refusal or failure that says Chrome is missing, or that its path names no Chrome, tells the agent where the user sets that path. |
+| [`browser_profile.rs`](browser_profile.rs) | `tinycomputer` | Whether a running Chrome holds the persistent profile folder, by the lock Chrome keeps there (`SingletonLock`, or `lockfile` on Windows). Chrome lets one browser at a time use a profile, so a task waits up to 5 s for one closing on it, then runs in a fresh profile. A browser of this process claims the folder before it starts, as Chrome locks it only once started, so two starting together never both take it. |
 | [`browser_task_report.rs`](browser_task_report.rs) | `tinycomputer` | What is kept when a task stops: a content-free log summary, and with tracing on the full report under `<workspace>/state/computer/tasks/`. |
 | [`browser_sites.rs`](browser_sites.rs), [`browser_sites/store.rs`](browser_sites/store.rs) | `tinycomputer` | Per-site memory of plans and elements learned by finished tasks, in `<workspace>/state/computer/sites/<site>.json`, with 30-day expiry. Fed back on `StartTask`; never reaches the agent's memory or prompts. |
 | [`connectors.rs`](connectors.rs) | `tinyconnectors` | `proxy`, `call`, `call_stateless`, `call_bare`, `reconcile_route_if_loaded`. Builds the route configuration (signed-in backend or the user's own Composio key) and reconciles it on every call so sign-out reaches the module. |
 | [`search/mod.rs`](search/mod.rs) | `tinysearch` | `module_config` from the host's resolved search policy, and `configured_tool_specs` computed synchronously from that same configuration. |
 | [`search/proxy.rs`](search/proxy.rs) | `tinysearch` | Lazy load, private reinitialization on configuration change, and serialized `list_tools` / `execute_tool`; `refresh_loaded` after settings saves and credential changes. |
 | [`tokenjuice_host.rs`](tokenjuice_host.rs) | `tinyjuice` | The reverse direction: an `MlHost` object the host serves at the contract's `ML_HOST_NAME` / `ML_HOST_PATH` for the module's tool-less summary model call. |
+| [`storage_host.rs`](storage_host.rs), [`storage_grants.rs`](storage_grants.rs) | every module | The reverse direction for storage: serves `ai.tinyhumans.tinystorage.Storage` (objects `Documents`, `Streams`, `Blobs`, `Secrets` at `/ai/tinyhumans/tinystorage/<Object>`) from the installed storage backend. The caller is the broker-authenticated sender mapped to a registry module id; its scope is `module:<id>@<base>` (a profile's is `<profile>~module:<id>`, under the profile's lease fence); its authority is the `StorageGrant` the build declares for it (`storage_grants::declared`, empty today, so no module has storage until it declares some). The host alone runs `ensure_collection`. Every call is audited (module, scope, object, op, target, outcome; no payload). Blob streams and watches answer `unsupported` until a per-module stream and signal route exists. |
 
-`tinymcp`, `tinybox`, `tinychannels` and `tinyhosts` have registry records but
-no host file in this folder.
+`tinybox.rs` supplies the pre-core gateway client.
+`channel_controller.rs` invokes TinyChannels' confidential controller member for
+Discord guild/channel discovery and permission checks, preserving the complete
+legacy RPC result types from the bus contract. OpenHuman resolves credentials
+and proxy scope; the module performs provider requests and permission analysis.
+The remaining channel runtime, MCP and core sandbox callers are still being
+migrated; their dependency exceptions remain explicit.
 
 ## Key types and entry points
 
@@ -251,6 +344,20 @@ no host file in this folder.
   status code answer without starting a broker.
 - `ops::set_bundled_releases_dir` (`ops.rs`) is called by the desktop host
   before the core starts.
+
+## Calls before core startup
+
+Hosts obtain `ModuleClient` through `openhuman_rpc::embed::modules`. Construct
+it with explicit configuration, and set bundled-artifact discovery before the
+first call. Construction starts nothing; calls use the same process-wide lazy
+loader as the core and require neither a core runtime nor a signed-in session.
+The client preserves argument tuple arity and offers confidential calls that
+require recipient attestation. A failed load or call returns a sanitized
+`ModuleCallError` and never executes an implementation library as a fallback.
+
+Stateful adapters must call the module's close, cancellation and shutdown
+members to release its resources. Keeping a native library mapped does not
+remove that obligation.
 
 ## RPC surface
 
@@ -303,7 +410,7 @@ loadable:
   | `tinydocs-bus` | `documents` |
   | `tinyvoice-bus` | `voice` |
   | `tinyjuice-bus` | inference kernel |
-  | `tinywallet-bus` | `web3` (the chain primitives are in `tinywallet-crypto`) |
+  | `tinywallet-bus` | `web3` (transport-neutral module contract vocabulary) |
   | `tinymcp-bus` | `mcp` |
   | `tinysearch-bus` | search provider declarations and bus payloads |
   | `tinycomputer-bus` | desktop, browser and task members |
@@ -312,8 +419,10 @@ loadable:
 
   Never redeclare a contract type here, and call members through the
   contract's constants rather than string literals. Contract crates stay
-  synchronous and free of I/O. Shared wire behavior belongs in the contract;
-  runtime, configuration and security policy stay in this host.
+  synchronous and free of I/O. Serialized types, errors, identifiers, versions,
+  schemas and static tool declarations belong in the contract. Component
+  algorithms execute inside the compiled module; configuration, execution
+  policy and approvals stay in this host.
 - Policy stays here even where the work moved into a module. For connectors
   that means egress policy (`crate::security::egress`, applied before
   `Execute`), route selection, and webhook delivery; scope enforcement belongs
@@ -322,8 +431,8 @@ loadable:
   budgets, and approval of irreversible steps.
 - Callers outside this folder: `runtime::client` re-exports `execute`,
   `resolve` and `RuntimeCallError` from `modules::runtime` so `runtime/`
-  compiles without the gate; `web3/seams.rs` and `web3/x402/seams.rs` use
-  `wallet.rs`; `tools/impl/document`, `tools/impl/presentation`,
+  compiles without the gate; wallet, Web3, and x402 adapters use `wallet.rs`;
+  `tools/impl/document`, `tools/impl/presentation`,
   `agent/multimodal.rs` and `agent/attachments/` use `documents.rs`;
   `voice/always_on` and `voice/streaming.rs` use `voice.rs`;
   `tools/impl/browser/` and `desktop/control/` use the TinyComputer files;
@@ -334,9 +443,12 @@ loadable:
 
 ## Gotchas
 
-- `lib.rs` gates the whole folder on the `modules` feature, which is in both
-  the contributor default set and the shipped product set. `documents`,
-  `voice` and `web3` each imply `modules` and turn on their host file here.
+- The registry, configuration types and shared `ModuleClient` are available
+  without the `modules` feature. The loader and capability adapters are gated
+  on `modules`, which is in both the contributor default set and the shipped
+  product set. A client compiled without the loader returns an explicit
+  unavailable error on a call. `documents`, `voice` and `web3` each imply
+  `modules` and turn on their host file here.
   Never enable `modules` directly on the unconditional `tinybus` dependency;
   it is forwarded from this crate's own feature (`modules =
   ["tinybus/modules", ...]`), so a build without `modules` does not pull in
@@ -361,8 +473,8 @@ loadable:
 
 Tests sit beside each file as `<file>_tests.rs`. Run them with
 `cargo test -p openhuman modules::` or `pnpm debug rust modules`. Tests that
-need a real module load a local build through `TINYSEARCH_TEST_MODULE`,
-`TINYCONNECTORS_TEST_MODULE`, or `[[modules.overrides]]`;
+need a real module load a local build through `[[modules.overrides]]` or
+`OPENHUMAN_MODULE_SOURCE`;
 `scripts/test-rust-with-mock.sh` and CI build the pinned submodules.
 
 See also `gitbooks/developing/performance.md` for how on-demand modules keep a
@@ -370,6 +482,14 @@ minimal build small.
 
 ## Further reading
 
+- [Module sources and `[components]` (AGENTS.md)](../../../../AGENTS.md)
 - [Loadable modules](../../../../gitbooks/developing/loadable-modules.md)
 - [tinybus submodule](../../../../vendor/tinybus/README.md)
 - [Architecture overview](../../../../gitbooks/developing/architecture.md)
+
+The connector host consumes verified release v0.14.0 (contract 1.13). The
+argument/default/filter/classification and trigger-archive adapters call bus
+members; no normal or build edge reaches `tinyconnectors` or its sync library.
+Provider messages remain product output, while terminal bus reports contain
+only the module/version/stage/platform/reason vocabulary. Credential-bearing
+configuration and direct reads use attested confidential calls.

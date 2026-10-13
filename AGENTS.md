@@ -363,8 +363,11 @@ Additional rules:
   namespace branches to `cli.rs` or the JSON-RPC server.
 - RPC namespace strings are wire contracts and do not follow directory
   renames.
-- Domain tools live with their domain and are re-exported through
-  `crates/openhuman-core/src/tools/mod.rs`. Keep only cross-cutting tools in
+- Domain tools live with their domain. Each domain builds its tool family
+  through a registration function; `tools::ops` composes those families before
+  applying capability filters. Preserve catalogue order when moving
+  registrations. Import concrete tools from their owning domain instead of
+  adding domain globs to `tools/mod.rs`. Keep only cross-cutting tools in
   `tools/impl/`.
 - Memory scope comes from the namespace, never from metadata or model
   arguments: `memory::scope` resolves the acting identity to a layout root
@@ -521,6 +524,8 @@ builds after changing a gate. Use `scripts/assert-shed.sh` or
 
 ## Loadable modules and bus contracts
 
+Hosts must interface with loadable components through their minimal `*-bus` contracts. Never import, re-export, link, or call their implementation libraries directly, including through wrapper crates or indirect dependencies. Execute component behavior through the compiled TinyBus module. If the required types or operations are missing, extend the contract and implementation in the owning repository and raise a PR against its canonical upstream first; then consume the released module and update OpenHuman’s gitlink and adapter. Do not introduce a host-side implementation workaround.
+
 ### Submodule ownership
 
 OpenHuman is the host and orchestrator for these components. It composes them,
@@ -599,7 +604,8 @@ Rules:
 - Never redeclare a contract type in OpenHuman.
 - Call members through contract constants, not string literals.
 - Contract crates stay synchronous and free of I/O and runtime dependencies.
-- Shared wire behavior belongs in the contract. Runtime, config, and security
+- Shared wire vocabulary belongs in the contract. Component algorithms execute
+  in the compiled module. Runtime, config, and security
   policy stay in the host.
 - Test the handwritten registry metadata against each contract's bus name and
   object path.
@@ -617,6 +623,27 @@ They share its privileges and crash domain.
 - Untrusted code belongs in a separate process.
 - Do not enable the `modules` feature directly on the unconditional
   `tinybus` dependency. Forward it from OpenHuman's own feature.
+
+Module sources (`OPENHUMAN_MODULE_SOURCE`, `[modules] source`; details in
+`crates/openhuman-core/src/modules/README.md`, "Module source"):
+
+- `release` is the registry-pinned, digest-checked GitHub artifact. CI and
+  shipped builds use `release` only; never document or configure `linked` or
+  `source` for CI or production.
+- `linked` (in-process factory) and `source` (a locally built artifact from the
+  gitlink) are local development and local tests only.
+- Iterate with `scripts/modules/build.mjs`, check the pin with
+  `scripts/modules/pin-status.mjs` before pushing, and release and re-pin with
+  `scripts/modules/release-and-repin.mjs`.
+
+`[components]` (`config.toml`, `OPENHUMAN_COMPONENT_<NAME>=0|1`) holds one bool
+per tiny dependency, all default true. It resolves to a `ComponentSet` that only
+narrows the host's `DomainSet`, `ServiceSet` and `ToolGroups`, and takes effect
+on the next core start. It adds no Cargo gate. A disabled component's module is
+never downloaded, mapped or registered (`ModuleState::Disabled`,
+`LoadError::Disabled`), its tools are not registered, its RPC namespace answers
+`COMPONENT_DISABLED:<name>`, and `about_app` marks its capabilities `disabled`.
+See `gitbooks/developing/components.md`.
 
 Memory uses `tinymemory-api` as its contract. `memory::api` is a selective
 re-export of the wire surface, not a place to copy or widen the whole crate.

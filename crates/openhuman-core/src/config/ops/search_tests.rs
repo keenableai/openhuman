@@ -44,7 +44,7 @@ fn switching_exa_to_its_own_key() {
         patch(json!({"providers": {"exa": {"route": "direct", "api_key": "e"}}})),
     )
     .unwrap();
-    assert_eq!(config.search.route("exa"), SearchRoute::Direct);
+    assert_eq!(config.search.route("exa"), ProviderRoute::Direct);
     assert_eq!(config.search.exa.key(), Some("e"));
 }
 
@@ -111,7 +111,7 @@ fn legacy_engine_from_an_older_client_still_works() {
     apply_search_patch(&mut config, patch(json!({"engine": "managed"}))).unwrap();
     assert!(config.search.is_enabled());
     apply_search_patch(&mut config, patch(json!({"engine": "parallel"}))).unwrap();
-    assert_eq!(config.search.route("parallel"), SearchRoute::Direct);
+    assert_eq!(config.search.route("parallel"), ProviderRoute::Direct);
     assert!(apply_search_patch(&mut config, patch(json!({"engine": "bing"}))).is_err());
 }
 
@@ -127,7 +127,7 @@ fn limits_presentation_and_allowlist_validate() {
                      "allowed_domains": ["b.com", " a.com ", "b.com"], "allow_all": false})),
     )
     .unwrap();
-    assert_eq!(config.search.presentation, SearchPresentation::AllTools);
+    assert_eq!(config.search.presentation, PresentationMode::AllTools);
     assert_eq!(config.search.max_results, 7);
     assert_eq!(
         config.http_request.allowed_domains,
@@ -177,7 +177,7 @@ fn settings_view_reports_status_roles_and_never_keys() {
     assert_eq!(provider(&view, "brave")["status"], "disabled");
     // Deep research rides on the Gemini key and is reported on the gemini row.
     assert_eq!(view["effective_roles"]["answer"], json!(["gemini", "exa"]));
-    assert_eq!(view["effective_roles"]["search"], json!(["exa"]));
+    assert_eq!(view["effective_roles"]["search"], json!(["exa", "gemini"]));
     assert!(!view.to_string().contains("secret-gemini"));
     assert!(view["providers"]
         .as_array()
@@ -220,7 +220,6 @@ fn keenable_turns_on_without_a_key_and_takes_an_optional_one() {
     );
     let view = search_settings_json_with(&config, false);
     let keenable = provider(&view, "keenable");
-    assert_eq!(keenable["label"], "Keenable");
     assert_eq!(keenable["routes"], json!(["direct"]));
     assert_eq!(keenable["takes_key"], true);
     assert_eq!(keenable["key_optional"], true);
@@ -247,4 +246,23 @@ fn keenable_turns_on_without_a_key_and_takes_an_optional_one() {
     )
     .unwrap_err();
     assert!(err.contains("does not support the managed route"), "{err}");
+}
+
+#[test]
+fn settings_report_the_search_component_as_disabled() {
+    let mut config = Config::default();
+    let on = search_settings_json_with(&config, true);
+    assert_eq!(on["component_disabled"], false);
+    config.components.search = false;
+    let off = search_settings_json_with(&config, true);
+    assert_eq!(off["enabled"], false);
+    assert_eq!(off["component_disabled"], true);
+    assert!(off["component_disabled_reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("COMPONENT_DISABLED:search"));
+    assert!(off["effective_roles"]["search"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }

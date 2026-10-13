@@ -12,6 +12,7 @@
 //! function here is served from the document port instead
 //! (`store_documents.rs`).
 
+use crate::storage::rusqlite;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -24,7 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::integrations::composio::providers::NormalizedTask;
+use crate::integrations::composio::contract::NormalizedTask;
 
 use super::types::{
     FetchReason, FilterSpec, ProviderSlug, SourceTarget, TaskSource, TaskSourcePatch,

@@ -12,7 +12,7 @@ mod origin_context;
 mod origin_delivery;
 mod retry;
 mod run_record;
-mod shell_job;
+pub(crate) mod shell_job;
 mod slot;
 
 #[cfg(test)]
@@ -41,12 +41,12 @@ pub(crate) use slot::SchedulerSlot;
 use crate::config::Config;
 use crate::core::bus::BUS;
 use crate::core::events::DomainEvent;
-use crate::cron::{due_jobs, CronJob};
 use crate::security::SecurityPolicy;
 use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::time::{self, Duration};
+use {crate::cron::due_jobs, tinyflows_schedule::types::CronJob};
 
 const MIN_POLL_SECONDS: u64 = 5;
 
@@ -152,9 +152,12 @@ pub async fn run_live_agent_pass(max_concurrent: usize) {
 
 /// Whether an agent can have jobs to poll: with a storage backend its jobs
 /// live in the backend under its scope (`crate::storage`), so there is always
-/// something to ask; without one, only once its own `jobs.db` exists.
+/// something to ask; without one, only once its own store exists, or the
+/// `jobs.db` tinyflows used to write there (which the first call imports).
 pub(crate) fn agent_jobs_may_exist(config: &Config) -> bool {
-    crate::storage::installed().is_some() || crate::cron::store::db_path(config).exists()
+    crate::storage::installed().is_some()
+        || crate::cron::store::db_path(config).exists()
+        || crate::cron::store::legacy_db_path(config).exists()
 }
 
 /// Single poll cycle of the scheduler loop, extracted so tests can drive

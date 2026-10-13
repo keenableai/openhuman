@@ -85,6 +85,11 @@ pub struct CoreContext {
     /// the model. Defaults to every group withheld, which is what the
     /// compiled-in pack table meant before the type existed.
     tool_groups: crate::tools::toolpacks::ToolGroups,
+    /// Which tiny dependencies the config switched off (`[components]`). Only
+    /// narrows: `domains` and `tool_groups` are already clamped by it, and this
+    /// is kept so dispatch can answer `COMPONENT_DISABLED:<name>` for a method
+    /// that a disabled component removed.
+    components: crate::core::runtime::ComponentSet,
     /// Whether skill discovery under this context scans the operator's
     /// user-scope roots (`~/.openhuman/skills`, `~/.agents/skills`).
     ///
@@ -103,6 +108,8 @@ pub struct CoreContext {
     backend_transport: Option<Arc<dyn crate::backend::transport::BackendTransport>>,
     /// Explicit authority on this derived turn context.
     turn_origin: Option<crate::agent::turn_origin::AgentTurnOrigin>,
+    /// Durable relay conversation carried by the immutable turn context.
+    channel_thread: Option<String>,
     /// The agent whose stores a host-installed session store
     /// ([`crate::agent::session_store`]) hands out to work under this
     /// context. `None` for booted contexts, which use the shared default.
@@ -154,8 +161,8 @@ impl CoreContext {
     pub async fn init_with_config(
         host_kind: HostKind,
         token: &TokenSource,
-        domains: crate::core::runtime::DomainSet,
-        tool_groups: crate::tools::toolpacks::ToolGroups,
+        mut domains: crate::core::runtime::DomainSet,
+        mut tool_groups: crate::tools::toolpacks::ToolGroups,
         preloaded_config: Option<crate::config::Config>,
         backend_transport: Option<Arc<dyn crate::backend::transport::BackendTransport>>,
     ) -> anyhow::Result<(Arc<CoreContext>, bool, Option<crate::config::Config>)> {
@@ -175,7 +182,10 @@ impl CoreContext {
         // 2. Load the master encryption key before any config/credential op that
         //    needs to decrypt secrets. No-op if already called (e.g. from
         //    run_core_from_args for the CLI).
-        crate::security::keyring::init_master_key().map_err(anyhow::Error::msg)?;
+        if let Some(config) = &preloaded_config {
+            crate::security::secret_storage::init_workspace(&config.workspace_dir);
+        }
+        crate::security::secret_storage::init_master_key().map_err(anyhow::Error::msg)?;
 
         // 4. Seed the per-process RPC bearer. `Fixed` seeds the in-memory value
         //    directly (never touches the env); `EnvOrFile` reads
@@ -234,6 +244,14 @@ impl CoreContext {
             }
             None => crate::config::Config::load_or_init().await,
         };
+        // `[components]` can only narrow what the host chose.
+        let components = match &loaded {
+            Ok(cfg) => crate::core::runtime::ComponentSet::from_config(&cfg.components),
+            Err(_) => crate::core::runtime::ComponentSet::all(),
+        };
+        domains = components.narrow_domains(domains);
+        tool_groups = components.narrow_tool_groups(tool_groups);
+        log::debug!("[core-context] init: components={components:?} effective domains={domains:?}");
         let config = match loaded {
             Ok(cfg) => {
                 init_stores(&cfg, domains).await;
@@ -263,10 +281,12 @@ impl CoreContext {
             }))),
             domains,
             tool_groups,
+            components,
             embedder_config,
             user_skill_roots: true,
             backend_transport,
             turn_origin: None,
+            channel_thread: None,
             session_agent: None,
             profile: None,
             agent: Default::default(),
@@ -292,6 +312,11 @@ impl CoreContext {
     /// Which domain families are live for this context (#4796). The controller
     /// registry consults this (via [`CoreContext::current`]) to filter its
     /// schema/dispatch/tool surface. `full()` for desktop/CLI.
+    /// The `[components]` switches this context booted with.
+    pub fn components(&self) -> crate::core::runtime::ComponentSet {
+        self.components
+    }
+
     /// Per-group tool disclosure for this context.
     pub fn tool_groups(&self) -> crate::tools::toolpacks::ToolGroups {
         self.tool_groups.clone()
@@ -381,10 +406,12 @@ impl CoreContext {
             workspace_binding: RwLock::new(shared_binding),
             domains,
             tool_groups: overlay.tool_groups,
+            components: self.components,
             embedder_config: Some(overlay.config),
             user_skill_roots: overlay.user_skill_roots,
             backend_transport: self.backend_transport.clone(),
             turn_origin: self.turn_origin.clone(),
+            channel_thread: self.channel_thread.clone(),
             session_agent: overlay.session_agent.or_else(|| self.session_agent.clone()),
             profile: overlay.profile.or_else(|| self.profile.clone()),
             agent,
@@ -535,10 +562,12 @@ impl CoreContext {
             }))),
             domains,
             tool_groups: Default::default(),
+            components: Default::default(),
             embedder_config: None,
             user_skill_roots: true,
             backend_transport: None,
             turn_origin: None,
+            channel_thread: None,
             session_agent: None,
             profile: None,
             agent: Default::default(),
@@ -567,10 +596,12 @@ impl CoreContext {
             }))),
             domains,
             tool_groups: Default::default(),
+            components: Default::default(),
             embedder_config: Some(config),
             user_skill_roots: true,
             backend_transport: None,
             turn_origin: None,
+            channel_thread: None,
             session_agent: None,
             profile: None,
             agent: Default::default(),
@@ -621,7 +652,7 @@ impl StoreInitPlan {
 pub async fn init_stores(cfg: &crate::config::Config, domains: crate::core::runtime::DomainSet) {
     let plan = StoreInitPlan::for_domains(domains);
 
-    let keyring_dir = crate::security::keyring::store::workspace_dir_for_file_backend();
+    let keyring_dir = crate::security::secret_storage::store::workspace_dir_for_file_backend();
     // Keyring path log + credentials Sentry bind (below) are unguarded — they
     // are core infra every DomainSet needs. Each workspace-bound store init is
     // gated on its owning DomainGroup so an excluded domain's store stays
@@ -631,7 +662,7 @@ pub async fn init_stores(cfg: &crate::config::Config, domains: crate::core::runt
         cfg.config_path.display(),
         cfg.workspace_dir.display(),
         keyring_dir.display(),
-        crate::security::keyring::backend_name(),
+        crate::security::secret_storage::backend_name(),
         domains,
     );
     if plan.memory {

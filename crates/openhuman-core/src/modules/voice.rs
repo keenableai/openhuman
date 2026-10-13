@@ -87,6 +87,19 @@ fn hallucination_mode_wire(mode: HallucinationMode) -> &'static str {
 /// the agent, rather than failing to decode.
 pub use tinyvoice_bus::VoiceIntent;
 
+/// Native capture lease types shared with the loaded TinyVoice module.
+pub use tinyvoice_bus::capture::{
+    CaptureBatch, CaptureError, CaptureFormat, CaptureHandle, CapturePollRequest, CaptureResult,
+    CaptureStream, MicrophonePermission, RawChunk, RecordingFinishRequest, RecordingStartRequest,
+};
+
+/// Hotkey lifecycle types shared with the loaded TinyVoice module.
+pub use tinyvoice_bus::hotkey::{
+    ActivationMode, HostKeyFact, HotkeyBatch, HotkeyError, HotkeyEvent, HotkeyFeedRequest,
+    HotkeyHandle, HotkeyHandleRequest, HotkeyReadRequest, HotkeyReply, HotkeyRequest,
+    HotkeyReserveRequest, HotkeySource, HotkeyStartRequest, HotkeyState, SequencedHostFact,
+};
+
 /// Classify a command transcript into a fast-path intent.
 ///
 /// The transcript should already have had its wake word removed by
@@ -433,6 +446,122 @@ pub async fn ensure_ready(config: &Config) -> Result<(), VoiceCallError> {
         .map_err(VoiceCallError::Unavailable)
 }
 
+/// Reserve an opaque handle before native microphone startup.
+pub async fn reserve_capture(
+    config: &Config,
+    permission: MicrophonePermission,
+) -> Result<CaptureResult<CaptureHandle>, VoiceCallError> {
+    call(
+        config,
+        methods::RESERVE_CAPTURE,
+        (RecordingStartRequest {
+            permission,
+            handle: None,
+        },),
+    )
+    .await
+}
+
+/// Start module-owned continuous capture under a known reservation.
+pub async fn start_capture(
+    config: &Config,
+    handle: CaptureHandle,
+    permission: MicrophonePermission,
+) -> Result<CaptureResult<CaptureStream>, VoiceCallError> {
+    call(
+        config,
+        methods::CAPTURE_START,
+        (RecordingStartRequest {
+            permission,
+            handle: Some(handle),
+        },),
+    )
+    .await
+}
+
+/// Read at most two native audio chunks in one bounded bus request.
+pub async fn poll_capture(
+    config: &Config,
+    request: CapturePollRequest,
+) -> Result<CaptureResult<CaptureBatch>, VoiceCallError> {
+    call(config, methods::CAPTURE_POLL, (request,)).await
+}
+
+/// Stop one capture stream and wait for native resource cleanup.
+pub async fn stop_capture(
+    config: &Config,
+    handle: CaptureHandle,
+) -> Result<CaptureResult<()>, VoiceCallError> {
+    call(config, methods::CAPTURE_STOP, (handle,)).await
+}
+
+/// Shut down all capture leases and wait for their native cleanup.
+pub async fn shutdown_capture(config: &Config) -> Result<CaptureResult<()>, VoiceCallError> {
+    call(config, methods::CAPTURE_SHUTDOWN, ()).await
+}
+
+/// Reserve a native or host-fed hotkey listener before startup.
+pub async fn reserve_hotkey(
+    config: &Config,
+    request: HotkeyRequest,
+) -> Result<Result<HotkeyHandle, HotkeyError>, VoiceCallError> {
+    call(
+        config,
+        methods::HOTKEY_RESERVE,
+        (HotkeyReserveRequest { request },),
+    )
+    .await
+}
+
+/// Start a reserved listener. Repeated starts recover a lost reply.
+pub async fn start_hotkey(
+    config: &Config,
+    handle: HotkeyHandle,
+) -> Result<Result<HotkeyReply, HotkeyError>, VoiceCallError> {
+    call(
+        config,
+        methods::HOTKEY_START,
+        (HotkeyStartRequest { handle },),
+    )
+    .await
+}
+
+/// Read an acknowledged/replayable batch of activation events.
+pub async fn read_hotkey(
+    config: &Config,
+    request: HotkeyReadRequest,
+) -> Result<Result<HotkeyBatch, HotkeyError>, VoiceCallError> {
+    call(config, methods::HOTKEY_READ, (request,)).await
+}
+
+/// Feed a bounded batch of host-owned generic key facts.
+pub async fn feed_hotkey(
+    config: &Config,
+    request: HotkeyFeedRequest,
+) -> Result<Result<HotkeyReply, HotkeyError>, VoiceCallError> {
+    call(config, methods::HOTKEY_FEED, (request,)).await
+}
+
+/// Stop a listener after its native hook has been removed and joined.
+pub async fn stop_hotkey(
+    config: &Config,
+    handle: HotkeyHandle,
+) -> Result<Result<HotkeyReply, HotkeyError>, VoiceCallError> {
+    call(
+        config,
+        methods::HOTKEY_STOP,
+        (HotkeyHandleRequest { handle },),
+    )
+    .await
+}
+
+/// Shut down every listener and wait for native cleanup.
+pub async fn shutdown_hotkeys(
+    config: &Config,
+) -> Result<Result<HotkeyReply, HotkeyError>, VoiceCallError> {
+    call(config, methods::HOTKEY_SHUTDOWN, ()).await
+}
+
 /// Base64 little-endian `f32`, which is how the interface carries samples.
 fn encode_samples(samples: &[f32]) -> String {
     use base64::Engine as _;
@@ -449,10 +578,8 @@ fn decode_samples(encoded: &str) -> Result<Vec<f32>, VoiceCallError> {
             bytes.len()
         )));
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    let (samples, _) = bytes.as_chunks::<4>();
+    Ok(samples.iter().copied().map(f32::from_le_bytes).collect())
 }
 
 /// Decode a base64 audio payload the module produced.

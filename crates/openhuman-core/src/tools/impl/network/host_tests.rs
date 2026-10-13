@@ -85,10 +85,36 @@ fn zero_limits_fall_back_to_the_http_request_config_defaults() {
     assert_ne!(limits.timeout_secs, 0);
 }
 
-#[test]
-fn tinyjuice_detects_and_converts_html() {
+#[tokio::test]
+async fn tinyjuice_detects_and_converts_html() {
+    if crate::modules::local_artifact("tinyjuice").is_none() {
+        eprintln!("SKIPPED: no tinyjuice library (node scripts/modules/build.mjs tinyjuice)");
+        return;
+    }
     let page = "<!DOCTYPE html><html><body><p>hi</p></body></html>";
-    assert!(TinyJuiceHtml.looks_like_html(page));
-    assert!(!TinyJuiceHtml.looks_like_html("# Just a README\n\nSome prose.\n"));
-    assert!(TinyJuiceHtml.to_markdown(page).contains("hi"));
+    assert!(TinyJuiceHtml.looks_like_html(page).await.unwrap());
+    assert!(!TinyJuiceHtml
+        .looks_like_html("# Just a README\n\nSome prose.\n")
+        .await
+        .unwrap());
+    assert!(TinyJuiceHtml
+        .to_markdown(page)
+        .await
+        .unwrap()
+        .contains("hi"));
+}
+
+#[cfg(feature = "web3")]
+#[test]
+fn x402_hook_declines_payment_when_wallet_component_is_off() {
+    let mut config = crate::config::Config::default();
+    assert!(x402::declined_when_wallet_off(&config).is_ok());
+    assert!(config.components.set("wallet", false));
+    assert_eq!(
+        x402::declined_when_wallet_off(&config).unwrap_err(),
+        "COMPONENT_DISABLED:wallet"
+    );
+    // Re-enabling needs no restart of the hook: it reads the config per call.
+    assert!(config.components.set("wallet", true));
+    assert!(x402::declined_when_wallet_off(&config).is_ok());
 }

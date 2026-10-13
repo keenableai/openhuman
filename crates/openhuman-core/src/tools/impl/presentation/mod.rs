@@ -27,7 +27,6 @@
 //! #3026 Files panel, and the orchestrator grounding rule in #3029
 //! continue to work without change.
 
-use crate::tools::implementations::document::format::spec::ImageFormat;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,9 +47,11 @@ mod types;
 #[path = "presentation_tests.rs"]
 mod tests;
 
+use crate::tools::implementations::document::format::spec::SlideImage;
+
 use self::types::{
-    validate_input, GeneratePresentationInput, GeneratePresentationOutput, ResolvedSlideImage,
-    SlideImage, SlideImageSource, MAX_IMAGE_BYTES,
+    validate_input, GeneratePresentationInput, GeneratePresentationOutput, SlideImageRequest,
+    SlideImageSource, MAX_IMAGE_BYTES,
 };
 
 /// Generation timeout. `ppt-rs` typically completes the full 64-slide
@@ -63,6 +64,41 @@ const GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Tool name surfaced to the agent. Stable; do not rename without
 /// coordinating with the orchestrator agent definition list.
 pub const TOOL_NAME: &str = "generate_presentation";
+
+#[async_trait]
+trait ImageInspector: Sync {
+    async fn inspect(&self, bytes: &[u8]) -> Result<tinydocs_bus::ImageFacts, String>;
+}
+
+struct ModuleImageInspector<'a> {
+    config: Option<&'a crate::config::Config>,
+}
+
+#[async_trait]
+impl ImageInspector for ModuleImageInspector<'_> {
+    async fn inspect(&self, bytes: &[u8]) -> Result<tinydocs_bus::ImageFacts, String> {
+        let loaded;
+        let config = match self.config {
+            Some(config) => config,
+            None => {
+                loaded = crate::config::ops::load_config_with_timeout()
+                    .await
+                    .map_err(|error| format!("config unavailable: {error}"))?;
+                &loaded
+            }
+        };
+        crate::modules::documents::ensure_ready(config)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(
+            GENERATION_TIMEOUT,
+            crate::modules::documents::inspect_image(config, bytes),
+        )
+        .await
+        .map_err(|_| "image inspection timed out".to_string())?
+        .map_err(|error| error.to_string())
+    }
+}
 
 /// One-shot `.pptx` generator. See module docs for the request flow.
 pub struct PresentationTool {
@@ -102,10 +138,11 @@ impl PresentationTool {
     /// The agent-registry constructor: the artifact metadata goes to
     /// `config.workspace_dir`, the deck to the files folder (#5505).
     pub fn for_config(config: &crate::config::Config, security: Arc<SecurityPolicy>) -> Self {
-        Self::new(
+        Self::with_config(
             config.workspace_dir.clone(),
             crate::agent::artifacts::FileRoots::from_config(config),
             security,
+            config.clone(),
         )
     }
 
@@ -406,14 +443,28 @@ impl PresentationTool {
     async fn resolve_images(
         &self,
         input: &GeneratePresentationInput,
-    ) -> (Vec<Vec<ResolvedSlideImage>>, Vec<String>) {
-        let mut per_slide: Vec<Vec<ResolvedSlideImage>> = Vec::with_capacity(input.slides.len());
+    ) -> (Vec<Vec<SlideImage>>, Vec<String>) {
+        self.resolve_images_with_inspector(
+            input,
+            &ModuleImageInspector {
+                config: self.config.as_ref(),
+            },
+        )
+        .await
+    }
+
+    async fn resolve_images_with_inspector(
+        &self,
+        input: &GeneratePresentationInput,
+        inspector: &impl ImageInspector,
+    ) -> (Vec<Vec<SlideImage>>, Vec<String>) {
+        let mut per_slide: Vec<Vec<SlideImage>> = Vec::with_capacity(input.slides.len());
         let mut warnings: Vec<String> = Vec::new();
 
         for (slide_idx, spec) in input.slides.iter().enumerate() {
             let mut resolved = Vec::with_capacity(spec.images.len());
             for (img_idx, image) in spec.images.iter().enumerate() {
-                match self.resolve_one_image(image).await {
+                match self.resolve_one_image(image, inspector).await {
                     Ok(r) => resolved.push(r),
                     Err(reason) => {
                         // 1-based indices in the message (matches how the
@@ -432,11 +483,15 @@ impl PresentationTool {
         (per_slide, warnings)
     }
 
-    /// Resolve a single [`SlideImage`] to validated, embeddable bytes.
+    /// Resolve a single [`SlideImageRequest`] to validated, embeddable bytes.
     /// Returns `Err(reason)` (a short human-readable string) when the
     /// image cannot be embedded — the caller turns that into a skip
     /// warning.
-    async fn resolve_one_image(&self, image: &SlideImage) -> Result<ResolvedSlideImage, String> {
+    async fn resolve_one_image(
+        &self,
+        image: &SlideImageRequest,
+        inspector: &impl ImageInspector,
+    ) -> Result<SlideImage, String> {
         let bytes = match &image.source {
             SlideImageSource::Artifact { artifact_id } => {
                 read_artifact_bytes(&self.workspace_dir, &self.files_dir, artifact_id)
@@ -479,24 +534,13 @@ impl PresentationTool {
             ));
         }
 
-        // Identification and measurement live in `crate::tools::implementations::document::format::spec::image`, which
-        // is ungated: a host resolving image bytes has to do this to build a
-        // spec, and it must not need the writer to do it. One implementation
-        // also means the host and the module cannot disagree about what is
-        // embeddable.
-        let format = ImageFormat::sniff(&bytes).ok_or_else(|| {
-            "unsupported image type (only PNG and JPEG are embeddable)".to_string()
-        })?;
+        let facts = inspector.inspect(&bytes).await?;
 
-        let (width_px, height_px) = format
-            .dimensions(&bytes)
-            .ok_or_else(|| format!("could not read {format} dimensions (corrupt header?)"))?;
-
-        Ok(ResolvedSlideImage {
+        Ok(SlideImage {
             bytes,
-            format,
-            width_px,
-            height_px,
+            format: facts.format,
+            width_px: facts.width_px,
+            height_px: facts.height_px,
             caption: image.caption.clone(),
         })
     }

@@ -24,7 +24,7 @@ use openhuman_core::integrations::composio::ops::{
 use openhuman_core::integrations::composio::{
     invalidate_connected_integrations_cache, FetchConnectedIntegrationsStatus,
 };
-use openhuman_core::tools::ComposioListToolsTool;
+use openhuman_core::integrations::composio::tools::ComposioListToolsTool;
 use tinytools::{Tool, ToolCallOptions};
 
 static ENV_LOCK: &OnceLock<tokio::sync::Mutex<()>> = &crate::SHARED_ENV_LOCK;
@@ -99,7 +99,6 @@ async fn setup_direct_config(base: &str) -> Harness {
     config.composio.mode = "direct".to_string();
     config.composio.api_key = Some(" ck_round25_direct ".to_string());
     config.composio.entity_id = " entity-round25 ".to_string();
-    config.node.enabled = false;
     config.secrets.encrypt = false;
     config.observability.analytics_enabled = false;
     config.save().await.expect("save config");
