@@ -403,9 +403,12 @@ impl BindError {
 }
 
 /// One storage object on the bus.
-struct ObjectService {
-    object: Object,
-    host: Arc<StorageHost>,
+pub(super) struct ObjectService {
+    pub(super) object: Object,
+    pub(super) host: Arc<StorageHost>,
+    /// Where the work runs when the object is served from a linked module's own
+    /// runtime: the host's, which the backend handles were opened on.
+    pub(super) runtime: Option<tokio::runtime::Handle>,
 }
 
 fn selectors(object: Object) -> &'static [&'static str] {
@@ -462,17 +465,51 @@ impl tinybus::Interface for ObjectService {
         } else {
             Admission::Private
         };
-        self.host
-            .handle(
-                self.object,
-                member.as_str(),
-                request_of(args)?,
-                context.authenticated_sender(),
-                admission,
-            )
+        let request = request_of(args)?;
+        let sender = context.authenticated_sender().cloned();
+        let Some(runtime) = &self.runtime else {
+            return self
+                .host
+                .handle(
+                    self.object,
+                    member.as_str(),
+                    request,
+                    sender.as_ref(),
+                    admission,
+                )
+                .await
+                .map_err(Into::into);
+        };
+        let host = Arc::clone(&self.host);
+        let object = self.object;
+        let selector = member.as_str().to_string();
+        runtime
+            .spawn(async move {
+                host.handle(object, &selector, request, sender.as_ref(), admission)
+                    .await
+            })
             .await
+            .map_err(|_| tinybus::Error::failed("storage call was cancelled"))?
             .map_err(Into::into)
     }
+}
+
+/// The scope the host serves `module_id` under right now: what a bus call from
+/// that module would be bound to. The host's own one-time legacy imports use it
+/// to write a module's records where the module will read them.
+///
+/// # Errors
+///
+/// When the acting scope cannot be resolved (SaaS mode with no profile) or the
+/// module id is not a plain name under a profile.
+pub(crate) fn current_module_scope(module_id: &str) -> Result<Scope, StorageError> {
+    let saas = crate::core::runtime::mode::is_saas();
+    // A module call arrives on the module bus, outside any turn, so with no
+    // tenant the host's default scope applies (refused in SaaS mode).
+    let tenant = crate::core::runtime::current_tenant().unwrap_or_default();
+    let base =
+        crate::storage::scope_from(tenant.profile.as_deref(), tenant.agent.as_deref(), saas)?;
+    module_scope(tenant.profile.as_deref(), &base, module_id)
 }
 
 /// Production wiring: the broker's name owners, the installed backend, the
@@ -502,13 +539,7 @@ impl Environment for Live {
     }
 
     fn module_scope(&self, module_id: &str) -> Result<Scope, StorageError> {
-        let saas = crate::core::runtime::mode::is_saas();
-        // A module call arrives on the module bus, outside any turn, so with no
-        // tenant the host's default scope applies (refused in SaaS mode).
-        let tenant = crate::core::runtime::current_tenant().unwrap_or_default();
-        let base =
-            crate::storage::scope_from(tenant.profile.as_deref(), tenant.agent.as_deref(), saas)?;
-        module_scope(tenant.profile.as_deref(), &base, module_id)
+        current_module_scope(module_id)
     }
 
     fn grant(&self, module_id: &str) -> Option<StorageGrant> {
@@ -526,11 +557,20 @@ impl Environment for Live {
     }
 }
 
-pub(super) async fn install(connection: &tinybus::Connection) -> tinybus::Result<()> {
+/// The production host: the live directory, environment and audit log.
+pub(super) fn live_host(connection: &tinybus::Connection) -> Arc<StorageHost> {
     let live = Arc::new(Live {
         connection: connection.clone(),
     });
-    let host = Arc::new(StorageHost::new(live.clone(), live, Arc::new(LogAudit)));
+    Arc::new(StorageHost::new(live.clone(), live, Arc::new(LogAudit)))
+}
+
+/// Serves the four objects and claims the interface name on `connection`.
+pub(super) async fn serve_objects(
+    connection: &tinybus::Connection,
+    host: &Arc<StorageHost>,
+    runtime: Option<tokio::runtime::Handle>,
+) -> tinybus::Result<()> {
     for object in [
         Object::Documents,
         Object::Streams,
@@ -543,12 +583,43 @@ pub(super) async fn install(connection: &tinybus::Connection) -> tinybus::Result
                 path,
                 ObjectService {
                     object,
-                    host: Arc::clone(&host),
+                    host: Arc::clone(host),
+                    runtime: runtime.clone(),
                 },
             )
             .await?;
     }
     connection.request_name(STORAGE_INTERFACE).await
+}
+
+/// Serves storage to modules.
+///
+/// Secrets travel only on tinybus' confidential route, and the broker delivers
+/// that route to an attested recipient alone: a loaded module whose artifact
+/// was verified, or code linked into this executable. The host's own client
+/// connection is neither, so serving from it would refuse every secret
+/// `NotAttested`. The objects are therefore served by a *linked* module
+/// ([`super::storage_host_linked`]). If that cannot be attached the objects
+/// are served from the host connection as before, with Secrets unreachable,
+/// and the failure is logged.
+pub(super) async fn install(
+    connection: &tinybus::Connection,
+    modules: &tinybus::module::ModuleHost,
+) -> tinybus::Result<()> {
+    let host = live_host(connection);
+    match super::storage_host_linked::attach(modules, connection, Arc::clone(&host)).await {
+        Ok(()) => {
+            tracing::debug!("[storage_host] serving storage from the attested linked module");
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "[storage_host] linked storage module unavailable; module secrets are refused"
+            );
+            serve_objects(connection, &host, None).await
+        }
+    }
 }
 
 #[cfg(test)]

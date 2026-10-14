@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use crate::agent::host_agents::HostAgent;
 use crate::channels::context::ChannelRuntimeContext;
-use crate::channels::traits;
 use crate::channels::{ChannelSendExt, SendMessage};
 use crate::config::Config;
 use crate::core::bus::BUS;
 use crate::core::events::DomainEvent;
+use tinychannels_bus as traits;
 
 pub(crate) mod posture;
 mod turn;
@@ -57,7 +57,7 @@ pub(crate) fn route(ctx: &ChannelRuntimeContext, channel: &str) -> HostRoute {
         if let (Some(context), Some(config), Some(definitions)) = (
             crate::core::runtime::CoreContext::scoped(),
             ctx.config.as_ref(),
-            crate::agent::harness::definition::AgentDefinitionRegistry::current(),
+            crate::agent::harness::host_definition::AgentDefinitionRegistry::current(),
         ) {
             if let Some(definition) = definitions.get("orchestrator") {
                 let mut definition = definition.clone();

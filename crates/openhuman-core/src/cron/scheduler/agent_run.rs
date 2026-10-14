@@ -6,13 +6,11 @@ use super::failure_classification::classify_agent_anyhow_for_user;
 use super::origin_context::build_run_prompt;
 use crate::agent::OpenHumanSessionHost;
 use crate::config::Config;
-use crate::core::bus::BUS;
-use crate::core::events::DomainEvent;
 use {tinyflows_schedule::types::CronJob, tinyflows_schedule::types::SessionTarget};
 
 /// Recency window the morning briefing installs around its turn so Composio
 /// task-fetch tools only surface tasks created/changed in the last day. Read
-/// by the `composio_execute` handler via `current_task_recency_window`.
+/// by the `composio_execute` handler via the run context (`OpenHumanRunExt`).
 pub(super) const MORNING_BRIEFING_TASK_RECENCY_SECS: u64 = 24 * 60 * 60;
 
 /// [`run_agent_job_for_run`] under a fresh run id.
@@ -62,7 +60,7 @@ pub(super) async fn run_agent_job_for_run(
     } else {
         let agent_id = selected_agent_id;
         if let Some(registry) =
-            crate::agent::harness::definition::AgentDefinitionRegistry::current()
+            crate::agent::harness::host_definition::AgentDefinitionRegistry::current()
         {
             if let Some(def) = registry.get(agent_id) {
                 tracing::debug!(
@@ -81,7 +79,7 @@ pub(super) async fn run_agent_job_for_run(
                 // that workload, regardless of which provider it lives
                 // on. Inherit / Exact keep their literal `resolve()`
                 // behaviour because neither relies on the `-v1` trick.
-                use crate::agent::harness::definition::ModelSpec;
+                use tinyagents_definition::ModelSpec;
                 let fallback_model = effective
                     .default_model
                     .clone()
@@ -166,6 +164,21 @@ pub(super) async fn run_agent_job_for_run(
                     // conversation, with its frozen system prompt and stale tool
                     // names. Every run starts from a fresh prompt instead.
                     start_cron_turn_clean(&mut agent);
+                    // Morning briefing only: Composio task-fetch tools
+                    // (Linear/ClickUp/Notion/Asana) surface only recently
+                    // created/changed tasks. Other cron agents and all chat
+                    // turns leave the window unset. It rides the run context
+                    // (`OpenHumanRunExt`), not a task-local.
+                    if is_morning_briefing_job(job) {
+                        tracing::debug!(
+                            job_id = %job.id,
+                            recency_window_secs = MORNING_BRIEFING_TASK_RECENCY_SECS,
+                            "[cron] applying morning-briefing task recency window"
+                        );
+                        agent.set_task_recency_window(Some(std::time::Duration::from_secs(
+                            MORNING_BRIEFING_TASK_RECENCY_SECS,
+                        )));
+                    }
                     // Scope the run's origin around the turn. A job with no
                     // channel origin runs as `TrustedAutomation { Cron }`: the
                     // approval gate treats it as user-authorized automation
@@ -189,28 +202,7 @@ pub(super) async fn run_agent_job_for_run(
                         }
                         None => Box::pin(turn),
                     };
-                    // Morning briefing only: install a 24h task-recency window
-                    // so Composio task-fetch tools (Linear/ClickUp/Notion/Asana)
-                    // surface only recently created/changed tasks. Other cron
-                    // agents and all chat turns leave the window unset.
-                    if is_morning_briefing_job(job) {
-                        tracing::debug!(
-                            job_id = %job.id,
-                            recency_window_secs = MORNING_BRIEFING_TASK_RECENCY_SECS,
-                            "[cron] applying morning-briefing task recency window"
-                        );
-                        crate::integrations::composio::task_recency_context::with_task_recency_window(
-                            std::time::Duration::from_secs(MORNING_BRIEFING_TASK_RECENCY_SECS),
-                            turn,
-                        )
-                        .await
-                    } else {
-                        tracing::trace!(
-                            job_id = %job.id,
-                            "[cron] task recency window not applied for this job"
-                        );
-                        turn.await
-                    }
+                    turn.await
                 }
                 Err(e) => Err(e),
             }
@@ -243,51 +235,6 @@ pub(super) async fn run_agent_job_for_run(
             (false, user_message.to_string(), Some(format!("{e:#}")))
         }
     }
-}
-
-/// Fires a `JobType::Flow` job. A system job (`system:<name>`, see
-/// [`crate::cron::system_jobs`]) publishes `DomainEvent::CronSystemJobDue` and,
-/// when a handler is registered for it
-/// ([`crate::cron::system_job_handlers`]), awaits that handler and returns its
-/// result;
-/// any other publishes `DomainEvent::FlowScheduleTick` for
-/// the bound flow id (stored in `job.command`, see `JobType::Flow`'s doc) and
-/// returns immediately. This job type does no work itself — dispatching the
-/// actual `flows::ops::flows_run` happens asynchronously in
-/// `flows::bus::FlowTriggerSubscriber`, which is the sole consumer of this
-/// event (kept out of the cron domain so cron stays flow-agnostic).
-pub(super) async fn run_flow_schedule_job(job: &CronJob) -> (bool, String) {
-    if let Some(name) = crate::cron::system_jobs::system_job_name(job) {
-        tracing::info!(job_id = %job.id, job = %name, "[cron] system job due — publishing CronSystemJobDue");
-        BUS.publish(DomainEvent::CronSystemJobDue {
-            job: name.to_string(),
-        });
-        // A host-registered handler is awaited and its result is the run's
-        // result; without one the job is announce-only and `ok` on dispatch.
-        let ctx = crate::cron::system_job_handlers::SystemJobContext {
-            job_id: job.id.clone(),
-            name: name.to_string(),
-        };
-        return match crate::cron::system_job_handlers::dispatch(ctx).await {
-            Some(Ok(())) => (true, format!("system job {name} completed")),
-            Some(Err(error)) => (false, format!("system job {name} failed: {error}")),
-            None => (true, format!("system job {name} dispatched")),
-        };
-    }
-    let flow_id = job.command.clone();
-    tracing::info!(
-        target: "flows",
-        job_id = %job.id,
-        %flow_id,
-        "[cron] flow schedule tick — publishing FlowScheduleTick"
-    );
-    BUS.publish(DomainEvent::FlowScheduleTick {
-        flow_id: flow_id.clone(),
-    });
-    (
-        true,
-        format!("flow schedule tick emitted for flow {flow_id}"),
-    )
 }
 
 /// Placeholder recorded in run history when an agent job succeeds but returns

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn recovery_tool_aliases_remain_stable() {
-    assert!(is_recovery_tool(RETRIEVE_TOOL_NAME));
+    assert!(is_recovery_tool(tinyjuice_bus::tools::RETRIEVE));
     assert!(is_recovery_tool(LEGACY_RETRIEVE_TOOL_NAME));
     assert!(!is_recovery_tool("shell"));
 }
@@ -53,7 +53,7 @@ async fn the_module_defers_a_summary_until_requested() {
         .text
         .contains("the rate limit is 60 requests a minute"));
     assert!(
-        output.text.contains(RETRIEVE_TOOL_NAME),
+        output.text.contains(tinyjuice_bus::tools::RETRIEVE),
         "the original stays retrievable: {}",
         output.text
     );
@@ -318,4 +318,43 @@ async fn released_queries_keep_cached_originals_in_the_module_and_accept_artifac
     let markdown = reply.unwrap();
     assert!(markdown.contains("hello"));
     assert!(!markdown.contains("secret_script"));
+}
+
+// ── [components] juice ────────────────────────────────────────────────
+
+fn juice_off() -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.components.juice = false;
+    config
+}
+
+#[test]
+fn juice_off_drops_handles_summaries_and_companion_tools() {
+    let on = crate::config::Config::default();
+    assert!(enabled(&on));
+    assert!(repl_handle_active(&on));
+    assert!(!companion_tool_names("orchestrator", &on).is_empty());
+
+    let off = juice_off();
+    assert!(!enabled(&off));
+    assert!(!repl_handle_active(&off));
+    assert!(!summarizes_tool_output("orchestrator", &off));
+    assert!(companion_tool_names("orchestrator", &off).is_empty());
+}
+
+// The module listing only exists with the `modules` feature.
+#[cfg(feature = "modules")]
+#[tokio::test]
+async fn juice_off_install_never_touches_the_module() {
+    let off = juice_off();
+    install_from_config(&off).await.expect("no-op");
+    // The resolution slot is process-global and other tests legitimately load
+    // tinyjuice into it, so its absolute state (`Available`) cannot be asserted
+    // here. The listing for a juice-off config reports `Disabled` with no
+    // source whatever the slot holds, which is what "never touches the module"
+    // means to a caller.
+    let statuses = crate::modules::ops::list(&off);
+    let status = statuses.iter().find(|s| s.id == "tinyjuice").unwrap();
+    assert_eq!(status.state, crate::modules::types::ModuleState::Disabled);
+    assert!(status.source.is_none());
 }

@@ -27,9 +27,10 @@ use crate::flows;
 #[cfg(test)]
 use crate::security::credentials::HttpCredential;
 use crate::security::credentials::HttpCredentialsStore;
-use crate::security::{CommandClass, SecurityPolicy};
 #[cfg(test)]
-use crate::security::{GateDecision, POLICY_BLOCKED_MARKER};
+use crate::security::GateDecision;
+use crate::security::SecurityPolicy;
+use tinybox_bus::CommandClass;
 
 // The live Composio catalog and probe moved to `composio::catalog` -- the domain
 // that owns Composio's vocabulary. This import is the edge pointing the right
@@ -38,8 +39,7 @@ use crate::security::{GateDecision, POLICY_BLOCKED_MARKER};
 #[cfg(test)]
 pub(crate) use crate::integrations::composio::catalog::ProbedOutputSample;
 pub(crate) use crate::integrations::composio::catalog::{
-    apply_probe_override, composio_required_args, fetch_live_toolkit_catalog,
-    probe_tool_output_sample, ToolContract,
+    composio_required_args, fetch_live_toolkit_catalog, probe_tool_output_sample, ToolContract,
 };
 #[cfg(test)]
 pub(crate) use crate::integrations::composio::catalog::{
@@ -155,7 +155,7 @@ async fn flow_tool_allowed(
     // Path A: a toolkit OpenHuman ships a static curated catalog for keeps its
     // strict curated-action + per-user scope gating (unchanged from B2).
     if let Some(catalog) = catalog_for_toolkit(&toolkit) {
-        let Some(curated) = find_curated(catalog, slug) else {
+        let Some(curated) = find_curated(&catalog, slug) else {
             tracing::debug!(target: "flows", %slug, %toolkit, "[flows] tool_call curation: reject — slug is not a curated action of this toolkit");
             return false;
         };

@@ -77,7 +77,14 @@ async fn a_summary_model_that_cannot_prepare_leaves_the_payload_intact() {
     // payload is untouched, and disclosed as unsummarized like any other
     // failed summary, so the model does not re-run the tool for one.
     struct Unpreparable;
-    impl PayloadSummarizer for Unpreparable {
+    impl
+        tinyagents_harness::summarization::payload_summarizer::PayloadSummarizer<
+            crate::agent::tinyagents::host::OpenHumanRunContext,
+        > for Unpreparable
+    {
+        type Prepared = crate::inference::tokenjuice::generate::PreparedGenerate;
+        type Error = anyhow::Error;
+
         fn prepare(
             &self,
             _parent_ctx: &RunContext<crate::agent::tinyagents::host::OpenHumanRunContext>,
@@ -129,7 +136,7 @@ async fn raw_security_policy_block_is_enriched_with_workaround_and_relay() {
         result_text(&result)
     );
     assert!(result_text(&result).contains("Relay this to the user"));
-    assert!(result_text(&result).contains(crate::security::POLICY_BLOCKED_MARKER));
+    assert!(result_text(&result).contains(tinytools::status::POLICY_BLOCKED_MARKER));
     assert!(result_text(&result).contains("read-only mode"));
 }
 

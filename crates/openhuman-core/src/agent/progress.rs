@@ -73,7 +73,7 @@ pub enum AgentProgress {
         /// failure (class, category, plain-language cause + next action) that
         /// the chat "View processing" timeline renders. `None` on success and
         /// on legacy snapshots. See `crate::tools::status`.
-        failure: Option<crate::tools::status::ClassifiedFailure>,
+        failure: Option<tinytools::status::ClassifiedFailure>,
         /// Server-computed human label recomputed from the tool's OWN
         /// [`tinytools::Tool::display_label`] using the real call arguments
         /// (the matching `ToolCallStarted.display_label` was computed with no
@@ -181,7 +181,7 @@ pub enum AgentProgress {
         /// breaker or iteration cap) and handed back as incomplete. The trace
         /// collector closes the subagent span at `WARNING` with it. `None` for
         /// a sub-agent that finished normally.
-        stop: Option<crate::agent::turn_stop::TurnStop>,
+        stop: Option<tinyagents_harness::turn_stop::TurnStop>,
     },
 
     /// A sub-agent failed.
@@ -223,7 +223,7 @@ pub enum AgentProgress {
         iteration: u32,
         /// Maximum iterations configured for this child run.
         max_iterations: u32,
-        /// `true` when the agent uses [`IterationPolicy::Extended`](crate::agent::harness::definition::IterationPolicy::Extended).
+        /// `true` when the agent uses [`IterationPolicy::Extended`](tinyagents_definition::IterationPolicy::Extended).
         /// The UI uses this to show "step N" instead of "turn N/M".
         extended_policy: bool,
     },
@@ -275,7 +275,7 @@ pub enum AgentProgress {
         /// child tool failure, mirroring [`Self::ToolCallCompleted::failure`] so
         /// a failed sub-agent row carries the same "why + what to do next" copy
         /// instead of discarding the already-computed classification (#4459).
-        failure: Option<crate::tools::status::ClassifiedFailure>,
+        failure: Option<tinytools::status::ClassifiedFailure>,
         /// Mirrors [`Self::ToolCallCompleted::display_label`], recomputed from
         /// the child tool's own `Tool::display_label` using the real call
         /// arguments.
@@ -422,7 +422,7 @@ pub enum AgentProgress {
         /// completion path. Content-free; the trace collector closes the turn
         /// span at `WARNING` with it. `None` for a turn that finished on its
         /// own.
-        stop: Option<crate::agent::turn_stop::TurnStop>,
+        stop: Option<tinyagents_harness::turn_stop::TurnStop>,
     },
 
     /// The turn's content: the user's prompt and the model's final reply.

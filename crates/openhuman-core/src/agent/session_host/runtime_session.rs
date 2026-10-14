@@ -55,6 +55,7 @@ pub(super) struct OpenHumanSessionState {
     required_output: Option<tinyagents_harness::config::RequiredOutput>,
     pub(crate) pending_turn_overrides: super::types::TurnOverrides,
     pub(super) active_turn_overrides: super::types::TurnOverrides,
+    pub(crate) pending_response_shape: super::types::PendingResponseShape,
     pub(super) reply_language_directive: Option<String>,
     pub(super) time_zone: Option<String>,
     prelude: Option<OpenHumanTurnPrelude>,
@@ -96,8 +97,8 @@ struct OpenHumanTurnPrelude {
     run_queue:
         Option<Arc<tinyagents_harness::run_queue::RunQueue<crate::agent::queued_turn::QueuedTurn>>>,
     allowed_subagent_ids: std::collections::HashSet<String>,
-    sandbox_mode: crate::agent::harness::definition::SandboxMode,
-    definition: Option<Arc<crate::agent::harness::definition::AgentDefinition>>,
+    sandbox_mode: tinyagents_definition::SandboxMode,
+    definition: Option<Arc<crate::agent::harness::host_definition::AgentDefinition>>,
     runtime_config: Option<Arc<crate::config::Config>>,
     /// This session's tool-rule layers; see `tool_rules.rs`.
     tool_rules: Arc<tinytools::ToolRuleSet>,
@@ -133,7 +134,7 @@ struct OpenHumanTurnToolSurface {
     /// off so refresh cannot reopen withdrawn authority.
     auto_include_new_synthesized_tools: bool,
     synthesized_tool_names: std::collections::HashSet<String>,
-    tool_policy_session: crate::tools::agent_policy::ToolPolicySession,
+    tool_policy_session: tinytools::ToolPolicySession,
     event_session_id: String,
     event_channel: String,
     agent_definition_name: String,
@@ -187,7 +188,7 @@ impl OpenHumanTurnPrelude {
     ) -> (
         Arc<Vec<Box<dyn tinytools::Tool>>>,
         Arc<Vec<Box<dyn tinytools::Tool>>>,
-        crate::tools::agent_policy::ToolPolicySession,
+        tinytools::ToolPolicySession,
         String,
         String,
     ) {
@@ -266,7 +267,7 @@ impl OpenHumanTurnPrelude {
     }
 
     fn build_system_prompt_tiered(&self) -> Result<crate::agent::prompts::TieredPrompt> {
-        use crate::agent::prompts::{tool_call_format_from_dialect, PromptContext, PromptTool};
+        use crate::agent::prompts::{PromptContext, PromptTool};
         let surface = self
             .tool_surface
             .lock()
@@ -330,9 +331,7 @@ impl OpenHumanTurnPrelude {
             workflows: &mutable.workflows,
             dispatcher_instructions: &instructions,
             visible_tool_names: &visible_tool_names,
-            tool_call_format: tool_call_format_from_dialect(
-                self.tool_dispatcher.tool_call_format(),
-            ),
+            tool_call_format: self.tool_dispatcher.tool_call_format(),
             connected_integrations: &mutable.connected_integrations,
             connected_identities_md: crate::agent::prompts::render_connected_identities(),
             user_identity: crate::security::credentials::identity::peek_credential_user_identity(),
@@ -440,10 +439,9 @@ impl OpenHumanTurnPrelude {
             }
         }
         // Build the roster from this turn's *effective* visible tool set
-        // (snapshotted under the tool-surface lock, then released) rather
-        // than the parent definition's static scope alone: a hide or named
-        // restriction can narrow what this turn can actually call below the
-        // definition's baseline, and the roster must not advertise a fleet
+        // (snapshotted under the tool-surface lock, then released), not the
+        // definition's static scope: a hide or named restriction can narrow
+        // what this turn can call, and the roster must not advertise a fleet
         // control the turn cannot invoke.
         let turn_fleet = {
             let visible = self
@@ -484,9 +482,9 @@ impl OpenHumanTurnPrelude {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             mutable.last_memory_context = (!context.is_empty()).then_some(context);
         }
+        run_context.response_shape = turn.response_shape.clone();
         run_context.attach_parent(self.parent_context());
         self.apply_pending_announcements(&mut enriched);
-
         run_context.attachment_placeholders = Arc::new(
             crate::agent::multimodal::extract_image_placeholders_in_text(original_user_message),
         );
@@ -505,10 +503,9 @@ impl OpenHumanTurnPrelude {
         // the prompt was composed for, so a text dialect keeps its schemas off
         // the wire and renders the catalogue itself (`ToolsSection` no longer
         // does), and a code call is recovered against the positional registry.
-        run_context.tool_dialect = crate::agent::prompts::tool_call_format_from_dialect(
+        run_context.tool_dialect = tinyagents_harness::dialect::dispatcher_for_format(
             self.tool_dispatcher.tool_call_format(),
-        )
-        .harness_dispatcher();
+        );
         format!("{}\n\n{enriched}", turn.preamble())
     }
 
@@ -549,9 +546,7 @@ impl OpenHumanTurnPrelude {
             session_id: self.event_session_id.clone(),
             channel: self.event_channel.clone(),
             connected_integrations,
-            tool_call_format: crate::agent::prompts::tool_call_format_from_dialect(
-                self.tool_dispatcher.tool_call_format(),
-            ),
+            tool_call_format: self.tool_dispatcher.tool_call_format(),
             session_key: self.session_key.clone(),
             session_parent_prefix: self.session_parent_prefix.clone(),
             on_progress: self.on_progress.clone(),
@@ -580,50 +575,7 @@ impl OpenHumanTurnPrelude {
     }
 
     async fn finalize_after_durable_commit(&self, receipt: &CommitReceipt<OpenHumanRunContext>) {
-        self.mirror_transcript_after_commit(receipt);
         self.memory_post_turn(receipt);
-    }
-
-    fn mirror_transcript_after_commit(&self, receipt: &CommitReceipt<OpenHumanRunContext>) {
-        let Some(path) = receipt
-            .transcript
-            .as_ref()
-            .map(|commit| commit.path.clone())
-        else {
-            return;
-        };
-        if !crate::agent::session_import::live::dual_write_enabled(self.config.session_dual_write) {
-            return;
-        }
-        let Some(stem) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        let workspace = self.workspace_dir.clone();
-        tokio::spawn(async move {
-            let read_path = path.clone();
-            let transcript = tokio::task::spawn_blocking(move || {
-                tinyagents_session::transcript::read_transcript(&read_path)
-            })
-            .await;
-            let Ok(Ok(transcript)) = transcript else {
-                log::warn!("[session-store] dual-write transcript read-back failed");
-                return;
-            };
-            if let Err(error) = tinyagents_session::transcript::import::live::write_live_turn(
-                &workspace,
-                &stem,
-                &transcript,
-                crate::agent::session_import::projector::journal_message_from_transcript,
-            )
-            .await
-            {
-                log::warn!("[session-store] dual-write failed stem={stem}: {error:#}");
-            }
-        });
     }
 }
 
@@ -735,12 +687,15 @@ impl OpenHumanSessionHost {
             &self.event_session_id,
         );
 
+        // `[components] juice = false`: truncation only, no compaction/summary.
+        let juice_on =
+            (self.runtime_config.as_ref()).is_none_or(|c| crate::inference::tokenjuice::enabled(c));
         let context_mw = TurnContextMiddleware {
             tool_result_budget_bytes,
-            payload_summarizer: self.payload_summarizer.clone(),
+            payload_summarizer: self.payload_summarizer.clone().filter(|_| juice_on),
             // Rooted outside the project; see `artifact_wiring` (#6408, #6483).
             artifact_store: Some(artifact_store),
-            tokenjuice_compaction_enabled,
+            tokenjuice_compaction_enabled: tokenjuice_compaction_enabled && juice_on,
             tokenjuice_compression: self.tokenjuice_compression,
             runtime_config: self.runtime_config.clone(),
             microcompact_keep_recent,
@@ -759,7 +714,7 @@ impl OpenHumanSessionHost {
             self.workspace_descriptor.clone(),
             self.resolved_definition()
                 .map(|definition| definition.sandbox_mode)
-                .unwrap_or(crate::agent::harness::definition::SandboxMode::None),
+                .unwrap_or(tinyagents_definition::SandboxMode::None),
             self.hosted_base.clone(),
             self.agent_definition_id.clone(),
         ));
@@ -826,7 +781,7 @@ impl OpenHumanSessionHost {
                 sandbox_mode: self
                     .resolved_definition()
                     .map(|definition| definition.sandbox_mode)
-                    .unwrap_or(crate::agent::harness::definition::SandboxMode::None),
+                    .unwrap_or(tinyagents_definition::SandboxMode::None),
                 definition: self.resolved_definition(),
                 runtime_config: self.runtime_config.clone(),
                 tool_rules: self.session_tool_rules(),

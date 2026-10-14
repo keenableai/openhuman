@@ -1,6 +1,7 @@
 use super::*;
 use tinyagents_harness::tool::response_fields_from_schema;
 use tinyflows::nodes::integration::agent_prompt::scale_timeout_for_iteration_cap;
+use tinytools::status::POLICY_BLOCKED_MARKER;
 
 /// The tier gate an `http_request` (Network-class) node calls: BLOCKED under
 /// a read-only tier, and passed through (to the ApprovalGate) under
@@ -395,9 +396,11 @@ fn agent_node_runtime_resolves_to_the_definitions_effective_iteration_cap() {
     let config = resolver_test_config(&tmp);
     assert_eq!(config.agent.max_tool_iterations, 10);
 
-    crate::agent::harness::definition::AgentDefinitionRegistry::init_global(&config.workspace_dir)
-        .expect("agent registry init");
-    let def = crate::agent::harness::definition::AgentDefinitionRegistry::global()
+    crate::agent::harness::host_definition::AgentDefinitionRegistry::init_global(
+        &config.workspace_dir,
+    )
+    .expect("agent registry init");
+    let def = crate::agent::harness::host_definition::AgentDefinitionRegistry::global()
         .expect("registry initialised")
         .get("planner")
         .expect("planner definition registered")

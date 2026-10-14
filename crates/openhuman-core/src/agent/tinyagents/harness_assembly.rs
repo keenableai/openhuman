@@ -17,25 +17,29 @@ use tinyinference_llm::model::CapabilitySet;
 use tokio::sync::mpsc::Sender;
 
 use crate::agent::progress::AgentProgress;
-use crate::agent::tinyagents::harness_context_ladder::install_context_ladder;
+use crate::agent::tinyagents::context_wiring::install_context_ladder;
 use crate::agent::tinyagents::harness_tool_registration::register_turn_tools_and_agents;
 use crate::agent::tinyagents::host::steering;
 use crate::agent::tinyagents::host::OpenHumanRunContext;
 use crate::agent::tinyagents::middleware::{self, TurnContextMiddleware};
-use crate::agent::tinyagents::model::{ErrorSlotModel, TurnChatModel};
+use crate::agent::tinyagents::model::TurnChatModel;
 use crate::agent::tinyagents::observability::{
-    IterationCursor, ProviderUsageCarry, SubagentScope, ToolFailureMap, ToolNameMap,
+    ProviderUsageCarry, SubagentScope, ToolFailureMap, ToolNameMap,
 };
 use crate::agent::tinyagents::routes;
 use crate::agent::tinyagents::stop_hooks;
 use crate::agent::tinyagents::tools::EarlyExitHook;
 use crate::agent::tinyagents::turn_models::TurnModels;
-use crate::agent::tinyagents::turn_outcome::{HaltSummarySlot, ToolOutcomeSink};
-use crate::agent::tinyagents::turn_policy::{
-    run_policy_for_provider, REPEATED_TOOL_FAILURE_THRESHOLD,
-};
+use crate::agent::tinyagents::turn_policy::run_policy_for_provider;
 use crate::agent::tinyagents::verify_before_finish;
+use tinyagents_harness::middleware::{
+    install_unmet_deliverable, is_repeat_call_exempt, tool_sets_lookup, ResearchBudgetMiddleware,
+    ShellTurnBudget, TurnClockMiddleware, DIRECT_WEB_READ_LIMIT,
+};
 use tinyagents_harness::store::InMemoryStore as ToolResultArtifactIndexStore;
+use tinyagents_harness::turn_outcome::{HaltSummarySlot, ToolOutcomeSink};
+use tinyagents_harness::turn_policy::REPEATED_TOOL_FAILURE_THRESHOLD;
+use tinyinference_llm::model::ErrorSlotModel;
 
 use super::ToolPolicyEnforcement;
 mod assembled;
@@ -156,7 +160,7 @@ pub(super) fn assemble_turn_harness(
     }
     let mut capability_registry: CapabilityRegistry<()> = CapabilityRegistry::new();
 
-    let cursor: IterationCursor = Arc::default();
+    let cursor: tinyagents_harness::events::IterationCursor = Arc::default();
     // Shared `call_id → tool_name` map: the forwarder records the name on
     // tool-call start (the crate `ToolDelta` carries none), the bridge reads it
     // to label the argument fragments now streamed via `MessageDelta.tool_call`.
@@ -300,14 +304,22 @@ pub(super) fn assemble_turn_harness(
             RepeatProgressMiddleware::new(
                 handle.clone(),
                 halt_summary.clone(),
-                Arc::new(middleware::is_repeat_call_exempt),
+                Arc::new(is_repeat_call_exempt),
             )
             .with_read_only(Arc::new(move |name: &str| read_only_tools.contains(name)))
             .with_cleared_placeholder(crate::agent::context::CLEARED_PLACEHOLDER),
         )
     });
     // Time awareness (#6953); before the repeat guard so its notes land last.
-    let shell_turn_budget = middleware::install_time_notes(&mut harness);
+    let turn_budget = harness
+        .policy()
+        .limits
+        .max_wall_clock_ms
+        .map(std::time::Duration::from_millis);
+    harness.push_middleware(Arc::new(TurnClockMiddleware::new(turn_budget)));
+    let shell_turn_budget =
+        ShellTurnBudget::with_max_timeout(turn_budget, tinytools_std::timeout::MAX_TIMEOUT_SECS);
+    harness.push_middleware(Arc::new(shell_turn_budget.notes()));
     if let Some(mw) = &repeat_progress {
         harness.push_middleware(mw.clone());
     }
@@ -316,7 +328,7 @@ pub(super) fn assemble_turn_harness(
     let repeated_failure = handle.as_ref().map(|handle| {
         let (t, halt) = (REPEATED_TOOL_FAILURE_THRESHOLD, halt_summary.clone());
         let mw = middleware::RepeatedToolFailureMiddleware::new(handle.clone(), t, halt);
-        Arc::new(mw.with_tool_facts(middleware::tool_sets_lookup(tool_sets.clone())))
+        Arc::new(mw.with_tool_facts(tool_sets_lookup(tool_sets.clone())))
     });
     if let Some(mw) = &repeated_failure {
         harness.push_middleware(mw.clone());
@@ -507,7 +519,7 @@ pub(super) fn assemble_turn_harness(
     )));
     // The context ladder (compression, microcompact, final-call wrap-up,
     // artifact contents list, trim), registered here so each step keeps its
-    // place in the middleware order. See `harness_context_ladder.rs`.
+    // place in the middleware order. See `context_wiring.rs`.
     let (compression_mw, wrap_up_fired) = install_context_ladder(
         &mut harness,
         model,
@@ -533,14 +545,24 @@ pub(super) fn assemble_turn_harness(
     );
     // The rungs above all *tell* the turn to produce its deliverable; this one
     // looks, on the same scope as the requirements check.
-    middleware::install_unmet_deliverable(&mut harness, is_subagent, agent_id);
+    if verify_before_finish::applies(is_subagent, agent_id) {
+        install_unmet_deliverable(&mut harness);
+    } else {
+        tracing::debug!(
+            is_subagent,
+            agent = agent_id.unwrap_or("<none>"),
+            "[unmet_deliverable] not installed for this turn"
+        );
+    }
 
     // Direct web lookup is bounded. Once enough search/fetch results have
     // returned, the web tools leave the request so the run works with what it
     // has; a run with nothing but web tools answers instead. Sub-agent runs
     // keep their own budgets and are not narrowed here.
     if subagent_scope.is_none() {
-        harness.push_middleware(Arc::new(middleware::ResearchBudgetMiddleware::new()));
+        harness.push_middleware(Arc::new(ResearchBudgetMiddleware::with_limit(
+            DIRECT_WEB_READ_LIMIT,
+        )));
     }
     // SDK-owned tool-policy projection (issue #4249 / tinyagents-full-migration
     // 01.1). Keep this narrow for now: enforce sandbox requirements declared by

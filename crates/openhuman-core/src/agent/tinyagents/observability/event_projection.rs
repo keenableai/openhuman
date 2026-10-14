@@ -3,8 +3,6 @@
 //! grep-friendly trace line for events with no UI surface), plus the
 //! prompt-cache layout diagnostic helper drained after a run.
 
-use std::sync::atomic::Ordering;
-
 use tinyagents_harness::cache::CacheLayoutEvent;
 use tinyagents_harness::events::{AgentEvent, EventListener, EventRecord};
 
@@ -17,7 +15,7 @@ impl EventListener for OpenhumanEventBridge {
     fn on_event(&self, record: &EventRecord) {
         match &record.event {
             AgentEvent::ModelStarted { .. } => {
-                let iteration = self.cursor.fetch_add(1, Ordering::SeqCst) + 1;
+                let iteration = tinyagents_harness::events::advance_iteration(&self.cursor);
                 match &self.scope {
                     None => self.send(AgentProgress::IterationStarted {
                         iteration,
@@ -286,7 +284,9 @@ impl EventListener for OpenhumanEventBridge {
                     "[tinyagents] context compressed before model call"
                 );
             }
-            AgentEvent::Compacted { .. } => super::compaction_log::log_compacted(&record.event),
+            AgentEvent::Compacted { .. } => {
+                tinyagents_harness::events::log_compacted(&record.event)
+            }
             AgentEvent::UnknownToolCall {
                 call_id,
                 requested_name,
@@ -569,15 +569,15 @@ impl EventListener for OpenhumanEventBridge {
                 // An unknown tool is `NotFound` from the typed event itself
                 // (#6277), whatever the text sniff made of the echoed names.
                 let failure = if was_unknown {
-                    Some(crate::tools::status::describe(
-                        crate::tools::status::ToolFailureClass::NotFound,
+                    Some(tinytools::status::describe(
+                        tinytools::status::ToolFailureClass::NotFound,
                     ))
                 } else {
                     match outcome {
                         Some((_, f, ..)) => f,
                         None => error
                             .as_deref()
-                            .map(|text| crate::tools::status::classify(text, false)),
+                            .map(|text| tinytools::status::classify(text, false)),
                     }
                 };
                 // Recompute the label/detail with the REAL call arguments

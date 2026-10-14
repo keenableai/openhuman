@@ -110,7 +110,8 @@ async fn fixture(
         .unwrap();
     (
         AccessibilityClient {
-            client: ModuleClient::fixture(proxy),
+            client: crate::modules::ops::fixture_client(proxy),
+            computer_enabled: true,
         },
         fixture,
         service,
@@ -231,7 +232,7 @@ async fn released_module_serves_permissions_and_confidential_target_validation()
         .overrides
         .push(crate::config::schema::ModuleOverride::with_path(
             "tinycomputer",
-            std::path::PathBuf::from(artifact).to_str().unwrap(),
+            artifact.to_str().unwrap(),
         ));
     let client = AccessibilityClient::new(&config);
     let permissions = client.permissions().await.expect("native permission query");
@@ -248,4 +249,18 @@ async fn released_module_serves_permissions_and_confidential_target_validation()
     );
     assert!(matches!(client.globe_start().await,
         Err(AccessibilityError::Operation(error)) if error.code == "PLATFORM_NOT_SUPPORTED"));
+}
+
+#[tokio::test]
+async fn component_off_refuses_before_reaching_the_module() {
+    let mut config = Config::default();
+    config.components.computer = false;
+    let client = AccessibilityClient::new(&config);
+    assert!(!client.computer_enabled());
+    match client.permissions().await {
+        Err(AccessibilityError::Operation(error)) => {
+            assert_eq!(error.message, "COMPONENT_DISABLED:computer");
+        }
+        other => panic!("expected COMPONENT_DISABLED, got {other:?}"),
+    }
 }

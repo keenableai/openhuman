@@ -20,7 +20,7 @@ use tinytools::ToolResult as TaToolResult;
 /// recording the final (summarized/capped) content the transcript keeps, not the
 /// raw payload.
 pub(crate) struct ToolOutcomeCaptureMiddleware {
-    sink: crate::agent::tinyagents::ToolOutcomeSink,
+    sink: tinyagents_harness::turn_outcome::ToolOutcomeSink,
     /// `call_id → (success, classified failure, elapsed, output chars)` fallback
     /// read by the event bridge when projecting `ToolCallCompleted`. TinyAgents
     /// 1.6 owns the raw outcome fields; the host still adds classified failure
@@ -38,7 +38,7 @@ pub(crate) struct ToolOutcomeCaptureMiddleware {
 
 impl ToolOutcomeCaptureMiddleware {
     pub(crate) fn new(
-        sink: crate::agent::tinyagents::ToolOutcomeSink,
+        sink: tinyagents_harness::turn_outcome::ToolOutcomeSink,
         failure_map: crate::agent::tinyagents::observability::ToolFailureMap,
     ) -> Self {
         Self {
@@ -129,7 +129,7 @@ impl Middleware<(), crate::agent::tinyagents::host::OpenHumanRunContext>
         } else {
             let combined = crate::agent::tinyagents::middleware::tool_result_text(result);
             let timed_out = combined.contains("timed out");
-            Some(crate::tools::status::classify(&combined, timed_out))
+            Some(tinytools::status::classify(&combined, timed_out))
         };
         // Host-only structured payload (e.g. `{"kind":"web_search", ...}`) a
         // tool attached via `ToolResult::metadata` for a richer UI
@@ -159,7 +159,7 @@ impl Middleware<(), crate::agent::tinyagents::host::OpenHumanRunContext>
             );
         }
         if let Ok(mut sink) = self.sink.lock() {
-            sink.push(crate::agent::tinyagents::ToolCallOutcome {
+            sink.push(tinyagents_harness::turn_outcome::ToolCallOutcome {
                 call_id,
                 name: tool_name.to_string(),
                 arguments,

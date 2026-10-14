@@ -30,7 +30,7 @@ pub async fn channel_relay_inbound(params: RelayInboundParams) -> Result<Outcome
     let tenant = crate::core::runtime::current_tenant().map_err(|error| error.to_string())?;
     let config = crate::config::rpc::load_config_with_timeout().await?;
     let identity = crate::modules::channel_controller::prepare_identity(
-        &crate::modules::client::ModuleClient::new(config.clone()),
+        &crate::modules::client(config.clone()),
         tinychannels_bus::module_inbound::PrepareChannelIdentityRequest {
             channel: params.channel.clone(),
             sender: Some(params.sender_id.clone()),
@@ -115,7 +115,7 @@ pub(crate) async fn run_relay_turn(
         params.message_id.clone(),
     ));
 
-    let client = crate::modules::client::ModuleClient::new(config.clone());
+    let client = crate::modules::client(config.clone());
     let (message_timeout_secs, _) =
         match prepare_runtime_limits(&client, config.channels_config.message_timeout_secs, 1).await
         {
@@ -124,7 +124,7 @@ pub(crate) async fn run_relay_turn(
                 tracing::warn!("relayed channel runtime limits unavailable: {error}");
                 let reply =
                     "⚠️ This chat's assistant is not available right now. Please try again later.";
-                let _ = crate::channels::traits::Channel::send(
+                let _ = tinychannels_bus::Channel::send(
                     channel.as_ref(),
                     &crate::channels::SendMessage::new(reply, &params.chat_id),
                 )
@@ -149,7 +149,7 @@ pub(crate) async fn run_relay_turn(
             );
             let reply =
                 "⚠️ This chat's assistant is not available right now. Please try again later.";
-            let _ = crate::channels::traits::Channel::send(
+            let _ = tinychannels_bus::Channel::send(
                 channel.as_ref(),
                 &crate::channels::SendMessage::new(reply, &params.chat_id),
             )
@@ -174,7 +174,7 @@ pub(crate) async fn run_relay_turn(
     // history from it, since this runtime context lives for one message.
     let message = params.to_channel_message();
     let prepared = match crate::modules::channel_controller::prepare_inbound(
-        &crate::modules::client::ModuleClient::new(config.clone()),
+        &crate::modules::client(config.clone()),
         tinychannels_bus::module_inbound::PrepareChannelInboundRequest {
             source: tinychannels_bus::module_inbound::ChannelInboundSource::Legacy {
                 message: message.clone(),

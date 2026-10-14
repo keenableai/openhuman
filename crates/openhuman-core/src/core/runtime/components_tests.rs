@@ -123,3 +123,35 @@ fn group_to_component_mapping_names_real_components() {
         }
     }
 }
+
+#[test]
+fn channels_on_never_widens_a_host_that_left_channels_out() {
+    let mut host = DomainSet::full();
+    host.channels = false;
+    let mut services = ServiceSet::desktop();
+    services.channels = false;
+    let on = ComponentSet::all();
+    assert!(!on.narrow_domains(host).channels);
+    assert!(!on.narrow_services(services).channels);
+}
+
+#[test]
+fn channels_off_names_the_typed_error_and_owns_the_channels_group() {
+    let c = off("channels");
+    let err = c.require("channels").unwrap_err();
+    assert_eq!(err.message, "COMPONENT_DISABLED:channels");
+    assert_eq!(
+        ComponentSet::component_for_group(DomainGroup::Channels),
+        Some("channels")
+    );
+}
+
+#[test]
+fn require_config_refuses_with_the_typed_error_only_when_the_flag_is_off() {
+    let mut config = crate::config::Config::default();
+    assert!(require_config(&config, "computer").is_ok());
+    config.components.computer = false;
+    let err = require_config(&config, "computer").unwrap_err();
+    assert!(err.contains("COMPONENT_DISABLED:computer"), "{err}");
+    assert!(require_config(&config, "search").is_ok());
+}

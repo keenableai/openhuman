@@ -98,7 +98,7 @@ fn agent_prompt_binding_unaffected() {
         ],
         "edges": [ { "from_node": "t", "to_node": "summarize" } ]
     }));
-    assert!(validate_binding_resolvability(&g).is_empty());
+    assert!(tinyflows::gates::failures(&g).is_empty());
 }
 
 /// Regression for issue #4593 (widened for #4881's `resume_flow_run`/
@@ -126,15 +126,17 @@ async fn flows_build_hides_the_live_run_tool_from_the_builder_belt() {
         live_runner.external_effect(),
         "the flows live-runner must be external-effect for the #4593 concern to apply"
     );
-    let resumer =
-        crate::flows::builder_tools::ResumeFlowRunTool::new(std::sync::Arc::new(config.clone()));
+    let resumer = crate::flows::builder_tools::tests_support::resume_flow_run_tool(
+        std::sync::Arc::new(config.clone()),
+    );
     assert!(
         resumer.external_effect(),
         "resume_flow_run advances a real run's outbound effects, so it must be \
          external-effect for the same #4593/#4881 concern to apply"
     );
-    let canceller =
-        crate::flows::builder_tools::CancelFlowRunTool::new(std::sync::Arc::new(config.clone()));
+    let canceller = crate::flows::builder_tools::tests_support::cancel_flow_run_tool(
+        std::sync::Arc::new(config.clone()),
+    );
     assert!(
         canceller.external_effect(),
         "cancel_flow_run is external-effect since the T-M3 fix — it stays hidden on THIS \
@@ -144,8 +146,10 @@ async fn flows_build_hides_the_live_run_tool_from_the_builder_belt() {
 
     // Building an agent constructs a memory client, which needs the host seams
     // wired. `Once`-guarded, so this is free when another test got there first.
-    crate::agent::harness::AgentDefinitionRegistry::init_global(&config.workspace_dir)
-        .expect("agent registry init");
+    crate::agent::harness::host_definition::AgentDefinitionRegistry::init_global(
+        &config.workspace_dir,
+    )
+    .expect("agent registry init");
     let mut agent =
         crate::agent::OpenHumanSessionHost::from_config_for_agent(&config, "workflow_builder")
             .expect("build workflow_builder agent");
@@ -242,8 +246,10 @@ async fn flows_build_copilot_toolset_unhides_the_live_run_tools() {
 
     // Building an agent constructs a memory client, which needs the host seams
     // wired. `Once`-guarded, so this is free when another test got there first.
-    crate::agent::harness::AgentDefinitionRegistry::init_global(&config.workspace_dir)
-        .expect("agent registry init");
+    crate::agent::harness::host_definition::AgentDefinitionRegistry::init_global(
+        &config.workspace_dir,
+    )
+    .expect("agent registry init");
     let mut agent =
         crate::agent::OpenHumanSessionHost::from_config_for_agent(&config, "workflow_builder")
             .expect("build workflow_builder agent");
@@ -303,9 +309,11 @@ async fn flows_build_applies_the_builder_definitions_effective_iteration_cap() {
 
     // Building an agent constructs a memory client, which needs the host seams
     // wired. `Once`-guarded, so this is free when another test got there first.
-    crate::agent::harness::AgentDefinitionRegistry::init_global(&config.workspace_dir)
-        .expect("agent registry init");
-    let def = crate::agent::harness::AgentDefinitionRegistry::global()
+    crate::agent::harness::host_definition::AgentDefinitionRegistry::init_global(
+        &config.workspace_dir,
+    )
+    .expect("agent registry init");
+    let def = crate::agent::harness::host_definition::AgentDefinitionRegistry::global()
         .expect("registry initialised")
         .get("workflow_builder")
         .expect("workflow_builder definition registered")

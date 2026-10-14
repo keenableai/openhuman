@@ -14,17 +14,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::*;
-use crate::agent::harness::definition::AgentDefinitionRegistry;
 use crate::agent::harness::fork_context::{with_parent_context, ParentExecutionContext};
-use crate::agent::prompts::ToolCallFormat;
+use crate::agent::harness::host_definition::AgentDefinitionRegistry;
 use crate::config::{AgentConfig, Config};
 use tinyagents_orchestration::teams::{SessionTeamLedger, TeamService};
 use tinyagents_session::run_ledger::{
-    self, AgentTeamMemberStatus, AgentTeamMemberUpsert, AgentTeamStatus, AgentTeamTaskStatus,
+    AgentTeamMemberStatus, AgentTeamMemberUpsert, AgentTeamStatus, AgentTeamTaskStatus,
     AgentTeamTaskUpsert, AgentTeamUpsert,
 };
 use tinyinference_llm::model::{ChatModel, ModelRequest, ModelResponse};
 use tinytools::Tool;
+use tinytools_agent::dialect::ToolCallFormat;
 
 // ── Mocks (mirror workflow_runs::engine_tests) ──────────────────────────────
 
@@ -94,8 +94,11 @@ fn test_config() -> (tempfile::TempDir, Config) {
 }
 
 fn team_service(config: &Config) -> TeamService<SessionTeamLedger> {
-    TeamService::new(SessionTeamLedger::new(config.workspace_dir.clone()))
+    let ledger = crate::agent::session_store::require_ledger(&config.workspace_dir).unwrap();
+    TeamService::new(SessionTeamLedger::new(ledger).unwrap())
 }
+
+use crate::agent::session_store::ledger_sync as run_ledger;
 
 fn seed_team(config: &Config, team_id: &str) {
     run_ledger::upsert_agent_team(

@@ -42,6 +42,8 @@ mod records_computer;
 mod records_docs_wallet;
 mod records_extra;
 mod records_mcp_connectors;
+#[cfg(feature = "tinymemes")]
+mod records_memes;
 mod records_memory_juice;
 mod records_search;
 mod records_voice;
@@ -58,13 +60,15 @@ use records_extra::TINYCHANNELS;
 #[cfg(feature = "hosting")]
 use records_extra::TINYHOSTS;
 use records_mcp_connectors::{TINYCONNECTORS, TINYMCP};
+#[cfg(feature = "tinymemes")]
+use records_memes::TINYMEMES;
 use records_memory_juice::TINYJUICE;
 use records_search::TINYSEARCH;
 #[cfg(feature = "voice")]
 use records_voice::TINYVOICE;
 
 /// Every module this build can load. The records whose contract crate is an
-/// optional dependency (`documents`, `web3`, `voice`, `hosting`) exist only when
+/// optional dependency (`documents`, `web3`, `voice`, `hosting`, `tinymemes`) exist only when
 /// that gate is on; a product-feature build carries all eleven.
 pub const ALL: &[ModuleRecord] = &[
     TINYCOMPUTER,
@@ -83,12 +87,27 @@ pub const ALL: &[ModuleRecord] = &[
     TINYCHANNELS,
     #[cfg(feature = "hosting")]
     TINYHOSTS,
+    #[cfg(feature = "tinymemes")]
+    TINYMEMES,
 ];
 
 /// The record for `id`, if this build knows it.
 #[must_use]
 pub fn find(id: &str) -> Option<&'static ModuleRecord> {
     ALL.iter().find(|record| record.id == id)
+}
+
+/// The resolver's view of [`ALL`], built once. The tinybus resolver takes
+/// `&'static` records, and the records are compiled constants, so this is a
+/// fixed-size table for the life of the process.
+#[must_use]
+pub fn release_records() -> Vec<&'static tinybus::module::ReleaseRecord> {
+    static TABLE: std::sync::OnceLock<Vec<tinybus::module::ReleaseRecord>> =
+        std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| ALL.iter().map(ModuleRecord::release).collect())
+        .iter()
+        .collect()
 }
 
 /// Which `[components]` switch owns each module id.
@@ -107,6 +126,7 @@ pub const COMPONENT_OF: &[(&str, &str)] = &[
     ("tinybox", "sandbox"),
     ("tinychannels", "channels"),
     ("tinyhosts", "hosting"),
+    ("tinymemes", "memes"),
 ];
 
 /// The `[components]` name that owns module `id`, if the table knows it.

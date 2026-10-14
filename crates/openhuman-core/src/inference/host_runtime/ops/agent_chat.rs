@@ -133,7 +133,7 @@ pub enum AgentChatTarget<'a> {
     /// can honour it: the other two resolve a definition the caller does not
     /// hold, so there is no agent for a host belt to belong to.
     Definition {
-        definition: &'a crate::agent::harness::definition::AgentDefinition,
+        definition: &'a crate::agent::harness::host_definition::AgentDefinition,
         host: Option<&'a crate::agent::HostTools>,
         /// History to seed this turn with, as `(role, content)` rows, instead
         /// of whatever the session would otherwise resume.
@@ -168,9 +168,24 @@ pub enum AgentChatTarget<'a> {
         untrusted_input: bool,
         /// A response format and output cap for every model call of the turn,
         /// and the slot its final call is reported into.
-        shape: Option<
-            &'a std::sync::Arc<crate::agent::tinyagents::response_shape::ResponseShapeScope>,
+        shape: Option<&'a std::sync::Arc<tinyagents_harness::middleware::ResponseShapeScope>>,
+        /// The observer scoped around the caller, re-established around the
+        /// turn because the dispatch may run on a worker task that does not
+        /// inherit task locals.
+        observer: Option<
+            &'a std::sync::Arc<tinyagents_harness::observability::turn_observer::ObserverScope>,
         >,
+        /// Files the host attaches to this turn as bytes, in order.
+        ///
+        /// Rides the target for the same reason `host` does: only an
+        /// in-process caller can hand over bytes, and `AGENT_CHAT` carries a
+        /// string. Each is staged into the acting workspace and reaches the
+        /// model as an image or document block ahead of the message, under
+        /// the configured multimodal count and size limits. No local path is
+        /// read, so they are accepted whatever the turn's origin.
+        ///
+        /// Empty for every caller that attaches nothing.
+        attachments: &'a [crate::agent::HostAttachment],
     },
 }
 
@@ -190,6 +205,8 @@ impl std::fmt::Debug for AgentChatTarget<'_> {
                 host_only,
                 untrusted_input,
                 shape,
+                observer,
+                attachments,
             } => f
                 .debug_struct("Definition")
                 .field("definition", &definition.id)
@@ -198,7 +215,9 @@ impl std::fmt::Debug for AgentChatTarget<'_> {
                 .field("meters", &usage.is_some())
                 .field("host_only", host_only)
                 .field("untrusted_input", untrusted_input)
+                .field("attachments", &attachments.len())
                 .field("shaped", &shape.is_some())
+                .field("observed", &observer.is_some())
                 .finish(),
         }
     }
@@ -207,9 +226,9 @@ impl std::fmt::Debug for AgentChatTarget<'_> {
 // Definitions are reusable snapshots. A turn override belongs only to the
 // definition passed to this call's factory, which otherwise wins over Config.
 fn definition_for_turn(
-    definition: &crate::agent::harness::definition::AgentDefinition,
+    definition: &crate::agent::harness::host_definition::AgentDefinition,
     temperature: Option<f64>,
-) -> std::borrow::Cow<'_, crate::agent::harness::definition::AgentDefinition> {
+) -> std::borrow::Cow<'_, crate::agent::harness::host_definition::AgentDefinition> {
     match temperature {
         Some(temperature) => {
             let mut scoped = definition.clone();
@@ -417,6 +436,42 @@ pub async fn agent_chat_reply_for(
         agent.set_thread_id(Some(id));
         log::debug!("[inference] agent_chat bound session for thread_id={id}");
     }
+    // Host attachments, staged where the provider will look for them: the
+    // turn's root when it has one, the configured `action_dir` otherwise.
+    // Their references lead the message, so the model reads the files first
+    // and the caption after, as an upload with a caption reads.
+    let staged_message;
+    let message = match target {
+        AgentChatTarget::Definition { attachments, .. } if !attachments.is_empty() => {
+            let staging_config = match turn_cwd.as_ref() {
+                Some(root) => {
+                    let mut scoped = config.clone();
+                    scoped.action_dir = root.clone();
+                    scoped
+                }
+                None => config.clone(),
+            };
+            let scope = crate::agent::attachments::AttachmentAccessScope {
+                external_channel: false,
+                workspace: turn_cwd.clone(),
+            };
+            let references = crate::agent::attachments::host::stage_host(
+                attachments,
+                turn_session_id.unwrap_or("direct"),
+                &staging_config,
+                &scope,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            log::debug!(
+                "[inference] agent_chat staged {} host attachment(s)",
+                attachments.len()
+            );
+            staged_message = format!("{references}{message}");
+            staged_message.as_str()
+        }
+        _ => message,
+    };
     if let AgentChatTarget::Definition {
         untrusted_input: true,
         ..
@@ -451,6 +506,14 @@ pub async fn agent_chat_reply_for(
             "[inference] agent_chat seeded {} row(s); transcript autoload suppressed",
             seed.len()
         );
+    }
+    // The response shape rides the session explicitly (no task-local): the
+    // next turn takes it into its run context.
+    if let AgentChatTarget::Definition {
+        shape: Some(scope), ..
+    } = target
+    {
+        agent.set_next_turn_response_shape(Some(std::sync::Arc::clone(scope)));
     }
     // Live progress for in-process embedders. `OpenHumanSessionHost::from_config` never
     // attaches a sink itself, so there is nothing to clobber here; callers that
@@ -495,9 +558,14 @@ pub async fn agent_chat_reply_for(
     };
     let outcome = match target {
         AgentChatTarget::Definition {
-            shape: Some(scope), ..
+            observer: Some(observer),
+            ..
         } => {
-            crate::agent::tinyagents::response_shape::with_response_shape(scope.clone(), run).await
+            tinyagents_harness::observability::turn_observer::with_observer(
+                std::sync::Arc::clone(observer),
+                run,
+            )
+            .await
         }
         _ => run.await,
     };

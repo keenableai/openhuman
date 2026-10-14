@@ -33,3 +33,38 @@ fn domain_mapping_names_real_components() {
         }
     }
 }
+
+#[test]
+fn every_mapped_domain_shows_disabled_when_its_component_is_off() {
+    for cap in super::super::all_capabilities() {
+        if let Some(name) = component_for_domain(cap.domain) {
+            let marked = apply_components(*cap, &off(name));
+            assert_eq!(marked.status, CapabilityStatus::Disabled, "{}", cap.id);
+        }
+    }
+}
+
+#[test]
+fn sandbox_capability_shows_disabled_when_sandbox_component_is_off() {
+    let cap = super::super::lookup("security.sandbox_backends").expect("sandbox capability");
+    assert_ne!(cap.status, CapabilityStatus::Disabled);
+    assert_eq!(
+        apply_components(cap, &off("sandbox")).status,
+        CapabilityStatus::Disabled
+    );
+    assert_eq!(apply_components(cap, &off("voice")).status, cap.status);
+}
+
+#[test]
+fn reply_remix_capability_shows_disabled_when_the_memes_component_is_off() {
+    let cap = super::super::lookup("conversation.reply_remix").expect("reply remix capability");
+    assert_ne!(cap.status, CapabilityStatus::Disabled);
+    assert_eq!(
+        apply_components(cap, &off("memes")).status,
+        CapabilityStatus::Disabled
+    );
+    // Other conversation capabilities do not follow the memes switch.
+    let send = super::super::lookup("conversation.send_text").expect("send_text");
+    assert_eq!(apply_components(send, &off("memes")).status, send.status);
+    assert_eq!(apply_components(cap, &off("voice")).status, cap.status);
+}

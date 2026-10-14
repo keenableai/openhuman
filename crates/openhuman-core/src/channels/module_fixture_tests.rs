@@ -10,9 +10,9 @@
 
 use crate::config::schema::ModuleSourceMode;
 use crate::config::Config;
-use crate::modules::client::ModuleClient;
 use crate::modules::linked::register_linked;
-use crate::modules::{host, ops};
+use crate::modules::{ops, runtime};
+use tinybus::module::ModuleClient;
 use tinychannels_bus::methods;
 
 const MODULE_ID: &str = "tinychannels";
@@ -25,7 +25,7 @@ pub(crate) async fn client() -> ModuleClient {
     ops::ensure_loaded(&config, MODULE_ID)
         .await
         .expect("the linked TinyChannels module should be admitted through the seam");
-    let proxy = host::runtime()
+    let proxy = runtime::runtime()
         .await
         .expect("the module host should be running")
         .proxy(
@@ -33,7 +33,7 @@ pub(crate) async fn client() -> ModuleClient {
             tinychannels_module::OBJECT_PATH,
         )
         .expect("the linked TinyChannels proxy should be valid");
-    ModuleClient::fixture(proxy)
+    ops::fixture_client(proxy)
 }
 
 #[tokio::test]
