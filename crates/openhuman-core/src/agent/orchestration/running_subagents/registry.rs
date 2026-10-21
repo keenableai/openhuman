@@ -5,7 +5,7 @@
 //! Each running async sub-agent registers here (via [`register`]), keyed by
 //! its `task_id`, with:
 //! - an `Arc<RunQueue>` — the same steering channel the steering forwarder in
-//!   `run_turn_via_tinyagents_shared` drains mid-turn, so `steer_subagent` can
+//!   `TurnSpec::run` drains mid-turn, so `steer_subagent` can
 //!   inject a message when no crate-native steering handle is registered;
 //! - a TinyAgents `SteeringHandle` in the process-local
 //!   `SteeringRegistry` while the child TinyAgents run is active, so
@@ -33,9 +33,10 @@ use tinyagents_harness::run_queue::RunQueue;
 use tinyagents_harness::CancellationToken;
 use tinyagents_tasks::DetachedTaskRegistry;
 
-use super::task_ledger::{record_spawned, task_store_for_workspace};
+use super::resolve::scoped_task_store;
+use super::task_ledger::record_spawned_in_store;
 use tinyagents_orchestration::subagent::{
-    spawn_status_watcher, DetachedSubagentStatus, SubagentIdentity, WaitError,
+    spawn_status_watcher, DetachedSubagentStatus, SpawnedSubagent, SubagentIdentity, WaitError,
 };
 
 #[derive(Clone)]
@@ -55,10 +56,8 @@ pub(crate) struct RunningSubagentMetadata {
 }
 
 /// Resolve the caller's profile without falling back to the operator in SaaS.
-fn caller_profile() -> Result<Option<String>, WaitError> {
-    let profile = crate::core::runtime::tenant::current_tenant()
-        .map_err(|_| WaitError::NotOwned)?
-        .profile;
+fn caller_profile(ctx: &crate::core::runtime::DispatchCtx) -> Result<Option<String>, WaitError> {
+    let profile = ctx.tenant().map_err(|_| WaitError::NotOwned)?.profile;
     if crate::core::runtime::is_saas() && profile.is_none() {
         return Err(WaitError::NotOwned);
     }
@@ -76,15 +75,19 @@ pub(crate) enum RegistrationError {
 
 /// Check the actual caller before any reusable-session or worker-thread write.
 pub(crate) fn admit_spawn(
+    ctx: &crate::core::runtime::DispatchCtx,
     workspace: &std::path::Path,
 ) -> Result<Option<String>, RegistrationError> {
-    admit_workspace(workspace).map_err(|_| RegistrationError::Scope)?;
-    caller_profile().map_err(|_| RegistrationError::Scope)
+    admit_workspace(ctx, workspace).map_err(|_| RegistrationError::Scope)?;
+    caller_profile(ctx).map_err(|_| RegistrationError::Scope)
 }
 
 /// Host ownership adapter over TinyAgents' opaque owner string.
-pub(super) fn owner_key(parent_session: &str) -> Result<String, WaitError> {
-    let profile = caller_profile()?;
+pub(super) fn owner_key(
+    ctx: &crate::core::runtime::DispatchCtx,
+    parent_session: &str,
+) -> Result<String, WaitError> {
+    let profile = caller_profile(ctx)?;
     Ok(crate::core::runtime::tenant::tenant_key(
         &crate::core::runtime::tenant::Tenant {
             profile,
@@ -96,18 +99,24 @@ pub(super) fn owner_key(parent_session: &str) -> Result<String, WaitError> {
 
 /// Public user controls may reach any of their profile's parents; desktop
 /// controls retain the process user's existing authority over all workers.
-pub(super) fn control_admits(metadata: &RunningSubagentMetadata) -> bool {
+pub(super) fn control_admits(
+    ctx: &crate::core::runtime::DispatchCtx,
+    metadata: &RunningSubagentMetadata,
+) -> bool {
     !crate::core::runtime::is_saas()
-        || caller_profile().is_ok_and(|profile| profile == metadata.profile)
+        || caller_profile(ctx).is_ok_and(|profile| profile == metadata.profile)
 }
 
 /// Durable fallback paths must stay in the caller's captured workspace.
-pub(super) fn admit_workspace(workspace: &std::path::Path) -> Result<(), WaitError> {
+pub(super) fn admit_workspace(
+    ctx: &crate::core::runtime::DispatchCtx,
+    workspace: &std::path::Path,
+) -> Result<(), WaitError> {
     if !crate::core::runtime::is_saas() {
         return Ok(());
     }
-    caller_profile()?;
-    let context = crate::core::runtime::CoreContext::scoped().ok_or(WaitError::NotOwned)?;
+    caller_profile(ctx)?;
+    let context = ctx.resolved().ok_or(WaitError::NotOwned)?;
     if context.workspace_dir().map_err(|_| WaitError::NotOwned)? != workspace {
         return Err(WaitError::NotOwned);
     }
@@ -162,6 +171,7 @@ pub(crate) fn status_channel() -> (
 /// entries so it stays bounded even if a parent never calls `wait_subagent`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
+    ctx: &crate::core::runtime::DispatchCtx,
     task_id: String,
     agent_id: String,
     parent_session: String,
@@ -173,7 +183,7 @@ pub(crate) fn register(
     abort: AbortHandle,
     status: watch::Receiver<DetachedSubagentStatus>,
 ) -> Result<(), RegistrationError> {
-    let profile = match admit_spawn(&workspace_dir) {
+    let profile = match admit_spawn(ctx, &workspace_dir) {
         Ok(profile) => profile,
         Err(error) => {
             abort.abort();
@@ -181,6 +191,10 @@ pub(crate) fn register(
             return Err(error);
         }
     };
+    let task_store = scoped_task_store(ctx, &workspace_dir).map_err(|_| {
+        abort.abort();
+        RegistrationError::Scope
+    })?;
     let owner = crate::core::runtime::tenant::tenant_key(
         &crate::core::runtime::tenant::Tenant {
             profile: profile.clone(),
@@ -190,6 +204,7 @@ pub(crate) fn register(
     );
     if let Some(thread_id) = parent_thread_id.as_deref() {
         if crate::agent::orchestration::background_completions::mark_stopped_task_if_thread_stopped(
+            ctx,
             &workspace_dir,
             thread_id,
             &task_id,
@@ -206,7 +221,7 @@ pub(crate) fn register(
         }
         // First spawn in a workspace this process has not scanned: redeliver any
         // completions a previous process finished there but never delivered.
-        crate::agent::orchestration::background_delivery::recover_on_boot(&workspace_dir);
+        crate::agent::orchestration::background_delivery::recover_on_boot(ctx, &workspace_dir);
     }
 
     let metadata = RunningSubagentMetadata {
@@ -235,20 +250,20 @@ pub(crate) fn register(
             RegistrationError::Registry(error)
         })?;
     // Failed admission must not leave a Running lifecycle record or watcher.
-    record_spawned(
-        &task_id,
-        &agent_id,
-        &parent_session,
-        session_parent_prefix.as_deref(),
-        subagent_session_id.as_deref(),
-        &workspace_dir,
-        parent_thread_id.as_deref(),
+    let workspace = workspace_dir.display().to_string();
+    record_spawned_in_store(
+        task_store.as_ref(),
+        &SpawnedSubagent {
+            task_id: &task_id,
+            agent_id: &agent_id,
+            parent_session: &parent_session,
+            session_parent_prefix: session_parent_prefix.as_deref(),
+            subagent_session_id: subagent_session_id.as_deref(),
+            workspace_dir: &workspace,
+            parent_thread_id: parent_thread_id.as_deref(),
+        },
     );
-    spawn_status_watcher(
-        task_store_for_workspace(&workspace_dir),
-        task_id.clone(),
-        status,
-    );
+    spawn_status_watcher(task_store, task_id.clone(), status);
     log::debug!(
         "[running_subagents] registered task_id={} live_entries={}",
         task_id,

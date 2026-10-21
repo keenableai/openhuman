@@ -1,8 +1,10 @@
 use crate::agent::tinyagents::middleware::tool_output::ToolOutputMiddleware;
 // Imported here rather than in the middleware module since #6014: the
-// production install site moved to `assemble_turn_harness` (which names it
+// production install site moved to `install_turn_middleware` (which names it
 // fully-qualified), so the module itself no longer references the type.
 use super::*;
+use crate::agent::tinyagents::middleware::turn_context::TurnContextMiddleware;
+use tinyagents_harness::middleware::library::DEFAULT_CLEARED_PLACEHOLDER as CLEARED_PLACEHOLDER;
 use tinyagents_harness::middleware::MicrocompactMiddleware;
 use tinytools::{ToolRuntime, ToolTimeout};
 
@@ -167,7 +169,7 @@ fn defaults_enable_the_byte_cap_only() {
     let mw = TurnContextMiddleware::defaults();
     assert_eq!(
         mw.tool_result_budget_bytes,
-        DEFAULT_TOOL_RESULT_BUDGET_BYTES
+        tinyagents_harness::config::TurnConfig::default().tool_result_budget_bytes
     );
     assert!(mw.payload_summarizer.is_none());
     assert_eq!(mw.microcompact_keep_recent, 0);
@@ -503,6 +505,16 @@ async fn tool_output_honors_a_tools_own_cap() {
         text.contains("truncated by tool_result_budget"),
         "a capped tool now takes the shared spill path, which says how much \
          is missing and how to get it: {text}"
+    );
+}
+
+/// The shared tool-result byte backstop is a user-visible truncation limit;
+/// moving the ladder into the harness must not change it.
+#[test]
+fn shared_tool_result_byte_budget_stays_16_kib() {
+    assert_eq!(
+        tinyagents_harness::config::TurnConfig::default().tool_result_budget_bytes,
+        16 * 1024
     );
 }
 

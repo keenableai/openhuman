@@ -28,13 +28,13 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use crate::agent::harness::run_channel_turn_via_graph;
-use crate::agent::tools::RunWorkflowTool;
 use crate::config::{Config, MultimodalConfig, MultimodalFileConfig};
 use crate::skills::ops_create::{
     create_workflow_inner, CreateWorkflowParams, WorkflowCreateInputDef,
 };
 use crate::skills::registry::get_workflow;
 use crate::skills::run_log;
+use crate::skills::run_workflow::RunWorkflowTool;
 use crate::skills::runtime::await_run_outcome;
 use tinyagents_session::transcript::TranscriptMessage;
 use tinyinference_llm::message::AssistantMessage;
@@ -210,6 +210,8 @@ async fn mock_llm_orchestrator_lists_and_runs_workflows_through_the_loop() {
         None,
         None,
         tinyagents_definition::SandboxMode::None,
+        Default::default(),
+        Default::default(),
     )
     .await
     .expect("tool loop should run to completion");

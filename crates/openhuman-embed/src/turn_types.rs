@@ -16,13 +16,16 @@ pub(super) fn overlay_response_usage(
     let preserve_host_cost = reported.cost_usd.is_none() && !reported.has_cost_receipt;
     let host_cost = usage.cost_usd;
     let host_source = usage.cost_source;
-    let root = openhuman_core::agent::turn_projection::failure_usage(reported);
-    usage.input_tokens = root.input_tokens;
-    usage.output_tokens = root.output_tokens;
-    usage.cached_input_tokens = root.cached_input_tokens;
-    usage.reasoning_tokens = root.reasoning_tokens;
-    let mut cost = root.cost_usd;
-    let mut source = root.cost_source;
+    usage.input_tokens = reported.input_tokens;
+    usage.output_tokens = reported.output_tokens;
+    usage.cached_input_tokens = reported.cached_tokens;
+    usage.reasoning_tokens = reported.reasoning_tokens;
+    let mut cost = reported.cost_usd;
+    let mut source = if reported.cost_usd.is_some() {
+        tinyagents_harness::cost::CostSource::Charged
+    } else {
+        tinyagents_harness::cost::CostSource::Unknown
+    };
     for child in &usage.subagents {
         usage.input_tokens = usage.input_tokens.saturating_add(child.usage.input_tokens);
         usage.output_tokens = usage
@@ -241,4 +244,9 @@ pub struct TurnOutcome {
     /// The model the provider says answered the final call. `None` when the
     /// provider did not say, or on a caller-built runtime's orchestrator.
     pub answered_model: Option<String>,
+    /// Messages sent through [`Turn::steering_handle`](crate::Turn::steering_handle)
+    /// that the turn ended without applying, in the order they were sent. The
+    /// turn's reply never saw them; run them as the next turn if they still
+    /// matter. Empty when every steer was applied or none was sent.
+    pub unapplied_steers: Vec<String>,
 }

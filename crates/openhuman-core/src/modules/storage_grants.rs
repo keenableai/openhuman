@@ -17,10 +17,19 @@
 //! module's own `EnsureCollection` is answered without touching the backend
 //! when it repeats the declared spec, and refused otherwise. `DropCollection`
 //! is never allowed.
+//!
+//! Queues are host-declared too. A grant with a [`QueueManifest`] serves the
+//! `Queues` object: the host declares the manifest's queues on the module's
+//! scope, and the bound server refuses any queue the manifest does not name
+//! (`NotFound`) and any `EnsureQueue` that disagrees with the declared spec
+//! (`Conflict`). A grant without one still answers `Features` (all false), so
+//! every module's storage connect succeeds, and refuses every other selector.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde_json::Value;
+use tinystoragedrivers::queue::QueueManifest;
 use tinystoragedrivers::CollectionSpec;
 
 pub(crate) use tinystoragedrivers_client::Object;
@@ -33,6 +42,7 @@ pub(crate) fn is_selector(object: Object, selector: &str) -> bool {
         Object::Streams => wire::is_streams_selector(selector),
         Object::Blobs => wire::is_blobs_selector(selector),
         Object::Secrets => wire::is_secrets_selector(selector),
+        Object::Queues => wire::is_queues_selector(selector),
     }
 }
 
@@ -49,8 +59,6 @@ pub(crate) enum Denied {
     Schema,
     /// The selector is not part of the contract, or carries no usable target.
     Malformed,
-    /// The selector needs a bus stream, which this host does not serve yet.
-    Unsupported,
 }
 
 impl Denied {
@@ -62,7 +70,6 @@ impl Denied {
             Self::ReadOnly => "read-only-grant",
             Self::Schema => "schema-is-host-only",
             Self::Malformed => "malformed-request",
-            Self::Unsupported => "unsupported-selector",
         }
     }
 }
@@ -107,11 +114,22 @@ pub struct StorageGrant {
     pub secret_prefixes: Vec<String>,
     /// Whether the module may write; `false` makes every grant read-only.
     pub writable: bool,
+    /// The queues the module may use, as a manifest the host declares on the
+    /// module's scope when it binds; `None` grants no `Queues` object.
+    pub queues: Option<Arc<QueueManifest>>,
+    /// Where the granted queues live: `None` (or `QueueConfig::Storage`) keeps
+    /// them in the module scope's own documents; a broker URL moves them
+    /// there when the host binds. Meaningless without [`Self::queues`].
+    pub queue_backend: Option<tinystoragedrivers::QueueConfig>,
 }
 
 /// Collection names no grant may hold: the encrypted secret documents and the
 /// storage layer's own `_`-prefixed records.
 const RESERVED_COLLECTIONS: [&str; 1] = [tinystoragedrivers::secrets::DEFAULT_COLLECTION];
+
+/// The storage layer's own collections (queue messages, leases, migrations).
+/// A module reaches the queue collections only through the `Queues` object.
+const RESERVED_COLLECTION_PREFIX: &str = "tsd.";
 
 impl StorageGrant {
     /// The schema the host ensures when it binds the module.
@@ -130,6 +148,7 @@ impl StorageGrant {
         for spec in &self.collections {
             if spec.name.is_empty()
                 || spec.name.starts_with('_')
+                || spec.name.starts_with(RESERVED_COLLECTION_PREFIX)
                 || RESERVED_COLLECTIONS.contains(&spec.name.as_str())
             {
                 return Err("a granted collection name is empty or reserved".into());
@@ -146,6 +165,11 @@ impl StorageGrant {
         if prefixes.into_iter().any(String::is_empty) {
             return Err("a granted prefix is empty".into());
         }
+        if let Some(manifest) = &self.queues {
+            manifest
+                .validate()
+                .map_err(|_| String::from("the granted queue manifest is invalid"))?;
+        }
         Ok(())
     }
 
@@ -155,6 +179,7 @@ impl StorageGrant {
             Object::Streams => !self.stream_prefixes.is_empty(),
             Object::Blobs => !self.blob_prefixes.is_empty(),
             Object::Secrets => !self.secret_prefixes.is_empty(),
+            Object::Queues => self.queues.is_some(),
         }
     }
 
@@ -175,51 +200,15 @@ impl StorageGrant {
     }
 }
 
-/// One module's declaration: its registry id and the grant it holds.
-type Declaration = (&'static str, fn() -> StorageGrant);
-
 /// The modules whose build declares storage, and what each may use.
 ///
-/// A module adds its row here (a declaration is a reviewable build-time
-/// decision, like the registry's digests) and then calls
-/// `ai.tinyhumans.tinystorage.Storage`; a module with no row has no storage at
-/// all. `tinymcp` (v0.18.0 and later) reaches its servers, audit log and
-/// environment secrets through this table; so do `tinyconnectors` (v0.18.0:
-/// scope preferences and trigger archive), `tinywallet` (v0.22.0: x402 ledger and
-/// budget hold), `tinybox` (v0.1.29: box records, jail index) and `tinyjuice`
-/// (v0.10.0: CCR blobs).
+/// The grant is generated from the module owner's `storage_schema()`
+/// (`storage_grant_schemas`), so it cannot drift from what the module
+/// declares; a module with no row has no storage at all. Rows: `tinychannels`,
+/// `tinymcp`, `tinyconnectors`, `tinywallet`, `tinybox` and `tinyjuice`.
 #[must_use]
 pub fn declared(module_id: &str) -> Option<StorageGrant> {
-    let table: &[Declaration] = &[
-        (
-            super::storage_grant_tinychannels::MODULE_ID,
-            super::storage_grant_tinychannels::grant,
-        ),
-        (
-            super::storage_grant_tinymcp::MODULE_ID,
-            super::storage_grant_tinymcp::grant,
-        ),
-        (
-            super::storage_grant_tinyconnectors::MODULE_ID,
-            super::storage_grant_tinyconnectors::grant,
-        ),
-        (
-            super::storage_grant_tinywallet::MODULE_ID,
-            super::storage_grant_tinywallet::grant,
-        ),
-        (
-            super::storage_grant_tinybox::MODULE_ID,
-            super::storage_grant_tinybox::grant,
-        ),
-        (
-            super::storage_grant_tinyjuice::MODULE_ID,
-            super::storage_grant_tinyjuice::grant,
-        ),
-    ];
-    table
-        .iter()
-        .find(|(id, _)| *id == module_id)
-        .map(|(_, grant)| grant())
+    super::storage_grant_schemas::grant_for(module_id)
 }
 
 fn text<'a>(request: &'a Value, field: &str) -> Result<&'a str, Denied> {
@@ -257,7 +246,27 @@ pub(crate) fn authorize(
     // bind when one is refused, so a grant without (say) blobs would leave the
     // whole module without storage. It reveals nothing of the data and every
     // other call on an ungranted object is still refused.
-    if !grant.has_object(object) && selector != "Capabilities" {
+    if selector == "Capabilities" && !grant.has_object(object) {
+        return match object {
+            Object::Documents => Ok(Plan::Answer(serde_json::json!({ "capabilities": [] }))),
+            Object::Blobs => Ok(Plan::Answer(serde_json::json!({
+                "presigned_urls": false,
+                "ttl": false,
+                "max_key_len": 0,
+            }))),
+            Object::Streams | Object::Secrets | Object::Queues => Err(Denied::Object),
+        };
+    }
+    // `BusStorage::connect` asks every module's host for queue features, so a
+    // module with no queue grant still connects: it learns it has no features
+    // and every other `Queues` selector is refused below.
+    if object == Object::Queues && selector == "Features" && !grant.has_object(object) {
+        return Ok(Plan::Answer(
+            serde_json::to_value(tinystoragedrivers_bus::QueueFeaturesReply::default())
+                .map_err(|_| Denied::Malformed)?,
+        ));
+    }
+    if !grant.has_object(object) {
         return Err(Denied::Object);
     }
     let write = is_write(object, selector);
@@ -269,6 +278,7 @@ pub(crate) fn authorize(
         Object::Streams => streams(grant, selector, request),
         Object::Blobs => blobs(grant, selector, request),
         Object::Secrets => secrets(grant, selector, request),
+        Object::Queues => queues(selector, request),
     }?;
     Ok(match plan {
         Plan::Forward { target, filter, .. } => Plan::Forward {
@@ -290,8 +300,19 @@ fn is_write(object: Object, selector: &str) -> bool {
         ) | (
             Object::Streams,
             "Append" | "AppendBatch" | "AppendBatchIfOffset" | "TruncateBefore" | "DeleteStream"
-        ) | (Object::Blobs, "Put" | "Delete" | "PresignPut")
+        ) | (Object::Blobs, "Put" | "PutStream" | "Delete" | "PresignPut")
             | (Object::Secrets, "Set" | "Delete")
+            | (
+                Object::Queues,
+                "EnsureQueue"
+                    | "Enqueue"
+                    | "Receive"
+                    | "Ack"
+                    | "Nack"
+                    | "Extend"
+                    | "Redrive"
+                    | "Purge"
+            )
     )
 }
 
@@ -342,10 +363,16 @@ fn documents(grant: &StorageGrant, selector: &str, request: &Value) -> Result<Pl
                 write: false,
             })
         }
-        // Watches are projected to bus signals, which this host does not
-        // route per module yet; opening one would leave a native watch task
-        // with nobody to tell, so it is refused instead of half-served.
-        "WatchOpen" | "WatchClose" => Err(Denied::Unsupported),
+        // A watch is bound to the module's own server, and its invalidations
+        // are unicast to that module's peer (`emit_to`), so the grant only has
+        // to cover the collection. Closing names a handle the module's own
+        // binding issued; another module's id is `NotFound` there.
+        "WatchOpen" => {
+            let collection = text(request, "collection")?;
+            grant.collection(collection)?;
+            Ok(forward(collection))
+        }
+        "WatchClose" => Ok(forward("")),
         "Capabilities" => Ok(forward("")),
         _ => Err(Denied::Malformed),
     }
@@ -392,16 +419,15 @@ fn streams(grant: &StorageGrant, selector: &str, request: &Value) -> Result<Plan
 
 fn blobs(grant: &StorageGrant, selector: &str, request: &Value) -> Result<Plan, Denied> {
     match selector {
-        // Streamed bodies need a bus stream argument, which the dynamic
-        // interface here does not carry; the inline selectors cover small
-        // blobs and these refuse rather than pretend.
-        "PutStream" | "GetStream" => Err(Denied::Unsupported),
-        "Get" | "GetRange" | "Head" | "PresignGet" => {
+        // The streamed transfers carry the request head as `request`; the body
+        // travels on a peer-bound bus stream the endpoint opens or accepts
+        // (`Connection::accept_stream_from` / `open_stream`).
+        "Get" | "GetStream" | "GetRange" | "Head" | "PresignGet" => {
             let key = text(request, "key")?;
             let granted = StorageGrant::prefixed(&grant.blob_prefixes, key)?;
             Ok(forward(granted))
         }
-        "Put" | "Delete" | "PresignPut" => {
+        "Put" | "PutStream" | "Delete" | "PresignPut" => {
             let key = text(request, "key")?;
             let granted = StorageGrant::prefixed(&grant.blob_prefixes, key)?;
             Ok(forward(granted))
@@ -447,6 +473,19 @@ pub(crate) fn filter_reply(grant: &StorageGrant, filter: ReplyFilter, reply: Val
     }
 }
 
+/// `Queues` selectors. The target is the request's queue; the bound server
+/// (holding the grant's manifest) refuses a queue the manifest does not name.
+fn queues(selector: &str, request: &Value) -> Result<Plan, Denied> {
+    match selector {
+        "Features" => Ok(forward("")),
+        _ => Ok(forward(text(request, "queue")?)),
+    }
+}
+
 #[cfg(test)]
 #[path = "storage_grants_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "storage_grants_queues_tests.rs"]
+mod queues_tests;

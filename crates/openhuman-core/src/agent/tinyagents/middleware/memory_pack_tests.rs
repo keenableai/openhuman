@@ -1,4 +1,7 @@
 use super::*;
+use tinyagents_harness::context::RunContext;
+use tinyagents_harness::middleware::Middleware;
+use tinyinference_llm::model::ModelRequest;
 
 use std::sync::Arc;
 
@@ -6,29 +9,32 @@ use tinyagents_harness::context::RunConfig;
 use tinyinference_llm::message::Message;
 
 use crate::memory::lifecycle::hooks::{MemoryTurn, TurnPack, OPEN_TAG};
-use crate::memory::scope::MemoryIdentity;
+use tinymemory_tools::lifecycle::turn::TurnPack as NativeTurnPack;
 
 fn context(pack: Option<TurnPack>) -> RunContext<OpenHumanRunContext> {
     let config = crate::config::Config::default();
     let mut data = OpenHumanRunContext::new();
     data.memory_turn = Some(Arc::new(MemoryTurn {
-        identity: MemoryIdentity::agent("a").resolve(&config),
+        identity: tinymemory_tools::layout::identity::Identity::agent("a")
+            .resolve(&crate::memory::scope::identity_pins(&config)),
         config: Arc::new(config),
         thread_id: "t".into(),
         pack,
+        in_prompt_from: Arc::new(tinymemory_tools::lifecycle::window::InPromptFrom::new(0, 0)),
+        core: None,
     }));
     RunContext::new(RunConfig::new("memory-pack-test"), data)
 }
 
 fn pack() -> TurnPack {
-    TurnPack {
+    TurnPack::from_native(NativeTurnPack {
         markdown: "# Memory\n\n## Learnings\n- The user prefers metric units".into(),
         tokens: 14,
         refs: vec!["id-1".into()],
         engine: "reference".into(),
         citations: Vec::new(),
         refusal: None,
-    }
+    })
 }
 
 #[tokio::test]
@@ -41,7 +47,7 @@ async fn the_pack_rides_every_request_of_the_turn() {
 
     for _ in 0..2 {
         let mut request = ModelRequest::new(history.clone());
-        MemoryPackMiddleware
+        memory_pack_middleware()
             .before_model(&mut ctx, &(), &mut request)
             .await
             .unwrap();
@@ -61,7 +67,7 @@ async fn the_pack_rides_every_request_of_the_turn() {
 async fn a_turn_without_a_pack_is_left_alone() {
     let mut ctx = context(None);
     let mut request = ModelRequest::new(vec![Message::user("hi")]);
-    MemoryPackMiddleware
+    memory_pack_middleware()
         .before_model(&mut ctx, &(), &mut request)
         .await
         .unwrap();
@@ -77,10 +83,9 @@ async fn a_turn_without_a_pack_is_left_alone() {
 // next turn's history.
 
 fn pack_saying(fact: &str) -> TurnPack {
-    TurnPack {
-        markdown: format!("# Memory\n\n## Learnings\n- {fact}"),
-        ..pack()
-    }
+    let mut pack = pack();
+    pack.native.markdown = format!("# Memory\n\n## Learnings\n- {fact}");
+    pack
 }
 
 async fn request_for(
@@ -91,7 +96,7 @@ async fn request_for(
     let mut ctx = context(Some(pack));
     ctx.model_profile = profile;
     let mut request = ModelRequest::new(history.to_vec());
-    MemoryPackMiddleware
+    memory_pack_middleware()
         .before_model(&mut ctx, &(), &mut request)
         .await
         .unwrap();

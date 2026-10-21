@@ -34,11 +34,7 @@ impl Environment for Env {
 
     fn module_scope(&self, module_id: &str) -> Result<Scope, StorageError> {
         let profile = self.profile.lock().unwrap().clone();
-        let base = match &profile {
-            Some(profile) => crate::storage::scope_for_profile(profile),
-            None => Scope::local(),
-        };
-        module_scope(profile.as_deref(), &base, module_id)
+        module_scope(profile.as_deref(), module_id)
     }
 
     fn grant(&self, module_id: &str) -> Option<StorageGrant> {
@@ -77,6 +73,8 @@ fn grant(collection: &str) -> StorageGrant {
         blob_prefixes: vec!["files/".into()],
         secret_prefixes: vec!["token.".into()],
         writable: true,
+        queues: None,
+        queue_backend: None,
     }
 }
 
@@ -100,7 +98,8 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    let backend: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let backend: Arc<dyn StorageBackend> =
+        Arc::new(super::super::storage_host_watching::WatchingStorage::new());
     let env = Arc::new(Env {
         backend: Mutex::new(Some(Arc::clone(&backend))),
         profile: Mutex::new(None),
@@ -465,7 +464,7 @@ async fn a_collection_listing_shows_only_the_modules_own_names() {
     .await
     .unwrap();
     // The host keeps something else in the module's scope.
-    let scope = module_scope(None, &Scope::local(), "alpha").unwrap();
+    let scope = module_scope(None, "alpha").unwrap();
     let storage = rig.backend.for_scope(&scope).unwrap();
     storage
         .documents()
@@ -532,10 +531,10 @@ async fn streams_and_blobs_stay_inside_their_prefixes() {
             &alpha(),
             Object::Blobs,
             "PutStream",
-            json!({"key": "files/x", "len": 1})
+            json!({"key": "elsewhere/x", "len": 1})
         )
         .await,
-        denied("unsupported-selector")
+        denied("target-not-granted")
     );
 }
 
@@ -681,7 +680,7 @@ async fn every_call_is_audited_without_its_payload() {
         trail[0],
         AuditRecord {
             module: "alpha".into(),
-            scope: "module:alpha@local".into(),
+            scope: "local/module:alpha".into(),
             object: "Documents",
             op: "Put".into(),
             target: "notes".into(),
@@ -698,8 +697,14 @@ async fn every_call_is_audited_without_its_payload() {
 #[path = "storage_host_bus_tests.rs"]
 mod bus;
 
+#[path = "storage_host_queues_tests.rs"]
+mod queues;
+
 #[path = "storage_host_cdylib_tests.rs"]
 mod cdylib;
+#[cfg(test)]
+#[path = "storage_host_stream_tests.rs"]
+mod streams;
 
 async fn set_secret(rig: &Rig) -> Result<Value, HostError> {
     let who = alpha();

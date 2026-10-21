@@ -1,12 +1,12 @@
 use super::*;
-use crate::agent::harness::fork_context::{with_parent_context, ParentExecutionContext};
-use crate::agent::harness::host_definition::AgentDefinition;
-use crate::agent::harness::host_definition::AgentDefinitionRegistry;
+use crate::agent::harness::fork_context::ParentExecutionContext;
 use crate::agent::orchestration::spawn_parallel::{
     prepare_spawn_parallel_tasks_from_defs, ParallelTaskRejectionKind, SpawnParallelTaskPreflight,
 };
 use crate::agent::tinyagents::host::OpenHumanRunContext;
 use crate::agent::OpenHumanSessionHost;
+use crate::agent_registry::host_definition::AgentDefinition;
+use crate::agent_registry::host_definition::AgentDefinitionRegistry;
 use crate::config::AgentConfig;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -81,6 +81,7 @@ fn parent_context(max_parallel_tools: usize) -> ParentExecutionContext {
         session_parent_prefix: None,
         on_progress: None,
         run_queue: None,
+        host_env: Default::default(),
     }
 }
 
@@ -111,7 +112,7 @@ async fn typed_dispatch_uses_the_parent_token_for_fanout_cancellation() {
         .into_tinyagents(tinyagents_harness::context::RunConfig::new("parent"));
 
     cancellation.cancel();
-    let result = with_parent_context(parent, async {
+    let result = (async {
         dispatch
             .execute(
                 &(),
@@ -168,7 +169,7 @@ fn definition_with_tool_scope(
         delegate_name: None,
         agent_tier: AgentTier::Worker,
         source: DefinitionSource::Builtin,
-        extensions: crate::agent::harness::host_definition::AgentExt {
+        extensions: crate::agent_registry::host_definition::AgentExt {
             omit_identity: true,
             omit_memory_context: true,
             omit_safety_preamble: true,

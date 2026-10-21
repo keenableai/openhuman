@@ -21,7 +21,7 @@ use crate::core::runtime::is_saas;
 /// (their store is the caller's workspace). Their cleanup of detached work is
 /// confined to the caller too: running sub-agents are cancelled only in the
 /// caller's workspace (`running_subagents::caller_workspace`), background
-/// completions are keyed per profile (`tenant::profile_key`) and web-channel
+/// completions are keyed per profile (`tenant::profile_key_in`) and web-channel
 /// sessions per tenant.
 pub const USER_METHODS: &[&str] = &[
     // Detached-worker controls compare the original worker's captured profile.
@@ -62,7 +62,7 @@ pub const USER_METHODS: &[&str] = &[
     // onto that user's `channel:` thread; replies reach only their `/events`.
     "openhuman.channel_relay_inbound",
     // Memory: reads and writes confined to the user's own tree
-    // (`memory::user_scope`). Engine and policy changes, sources, imports and
+    // (`tinymemory_tools::confine::Policy::Clamp`). Engine and policy changes, sources, imports and
     // backfills stay closed: they reach the host or change where memory lives.
     "openhuman.memory_recall",
     "openhuman.memory_fetch",

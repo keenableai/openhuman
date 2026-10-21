@@ -4,6 +4,7 @@
 use crate::env_guard::{env_lock, env_lock_async, EnvVarGuard};
 use crate::rpc_auth::ensure_rpc_auth;
 use crate::rpc_harness::{ok, payload, rpc, schema};
+use openhuman_core::core::runtime::DispatchCtx;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -27,7 +28,7 @@ use openhuman_core::config::schema::{
 };
 use openhuman_core::config::{
     clear_active_user, default_projects_dir, pre_login_user_dir, read_active_user_id,
-    user_openhuman_dir, write_active_user_id, Config, DaemonConfig, DictationActivationMode,
+    user_openhuman_dir, write_active_user_id, Config, DaemonConfig,
     UpdateRestartStrategy,
 };
 use openhuman_core::core::events::DomainEvent;
@@ -1096,11 +1097,13 @@ async fn config_default_path_loader_ignores_workspace_override_and_projects_dir_
     let root = home.join(".openhuman");
     let user_dir = root.join("users").join("default-loader-user");
     let workspace_override = tmp.path().join("workspace-override");
-    let _guards = [EnvVarGuard::set_to_path("HOME", &home),
+    let _guards = [
+        EnvVarGuard::set_to_path("HOME", &home),
         EnvVarGuard::unset(APP_ENV_VAR),
         EnvVarGuard::unset(VITE_APP_ENV_VAR),
         EnvVarGuard::set_to_path("OPENHUMAN_WORKSPACE", &workspace_override),
-        EnvVarGuard::set("OPENHUMAN_MODEL", " default-loader-model ")];
+        EnvVarGuard::set("OPENHUMAN_MODEL", " default-loader-model "),
+    ];
 
     let missing = Config::load_from_default_paths()
         .await
@@ -1198,12 +1201,6 @@ async fn config_env_overlay_public_loader_applies_runtime_and_tool_overrides() {
         EnvVarGuard::set("OPENHUMAN_AUTO_UPDATE_INTERVAL_MINUTES", "1440"),
         EnvVarGuard::set("OPENHUMAN_AUTO_UPDATE_RESTART_STRATEGY", "supervisor"),
         EnvVarGuard::set("OPENHUMAN_AUTO_UPDATE_RPC_MUTATIONS_ENABLED", "false"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_ENABLED", "true"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_HOTKEY", "CmdOrCtrl+Shift+D"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_ACTIVATION_MODE", "toggle"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_LLM_REFINEMENT", "false"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_STREAMING", "false"),
-        EnvVarGuard::set("OPENHUMAN_DICTATION_STREAMING_INTERVAL_MS", "333"),
         EnvVarGuard::set("OPENHUMAN_CONTEXT_ENABLED", "false"),
         EnvVarGuard::set("OPENHUMAN_CONTEXT_MICROCOMPACT_ENABLED", "false"),
         EnvVarGuard::set("OPENHUMAN_CONTEXT_AUTOCOMPACT_ENABLED", "false"),
@@ -1259,15 +1256,6 @@ async fn config_env_overlay_public_loader_applies_runtime_and_tool_overrides() {
         UpdateRestartStrategy::Supervisor
     );
     assert!(!config.update.rpc_mutations_enabled);
-    assert!(config.dictation.enabled);
-    assert_eq!(config.dictation.hotkey, "CmdOrCtrl+Shift+D");
-    assert_eq!(
-        config.dictation.activation_mode,
-        DictationActivationMode::Toggle
-    );
-    assert!(!config.dictation.llm_refinement);
-    assert!(!config.dictation.streaming);
-    assert_eq!(config.dictation.streaming_interval_ms, 333);
     assert!(!config.context.enabled);
     assert!(!config.context.microcompact_enabled);
     assert!(!config.context.autocompact_enabled);
@@ -1710,12 +1698,12 @@ async fn credentials_public_ops_cover_service_and_missing_session_error_paths() 
     };
     config.secrets.encrypt = false;
     config.local_ai.runtime_enabled = false;
-    config.voice_server.auto_start = false;
     std::fs::create_dir_all(config.config_path.parent().expect("config parent"))
         .expect("create config parent");
 
-    openhuman_core::security::credentials::start_credential_gated_services(&config).await;
-    openhuman_core::security::credentials::stop_credential_gated_services(&config).await;
+    let ctx = openhuman_core::core::runtime::DispatchCtx::host_default();
+    openhuman_core::security::credentials::start_credential_gated_services(&ctx, &config).await;
+    openhuman_core::security::credentials::stop_credential_gated_services(&ctx, &config).await;
 
     // The account-bound link-token and OAuth ops live in `openhuman-tinyhumans`
     // (`hosted::{channel_link, oauth}`); validation still runs first, and a
@@ -1824,14 +1812,12 @@ async fn worker_a_controller_schemas_are_fully_exposed() {
                 "openhuman.config_get_composio_trigger_settings",
                 "openhuman.config_get_dashboard_settings",
                 "openhuman.config_get_data_paths",
-                "openhuman.config_get_dictation_settings",
                 "openhuman.config_get_onboarding_completed",
                 "openhuman.config_get_privacy_mode",
                 "openhuman.config_get_runtime_flags",
                 "openhuman.config_get_sandbox_settings",
                 "openhuman.config_get_search_settings",
                 "openhuman.config_get_user_timezone",
-                "openhuman.config_get_voice_server_settings",
                 "openhuman.config_reset_local_data",
                 "openhuman.config_resolve_api_url",
                 "openhuman.config_set_browser_allow_all",
@@ -1844,7 +1830,6 @@ async fn worker_a_controller_schemas_are_fully_exposed() {
                 "openhuman.config_update_browser_settings",
                 "openhuman.config_update_composio_trigger_settings",
                 "openhuman.config_update_computer_settings",
-                "openhuman.config_update_dictation_settings",
                 "openhuman.config_update_local_ai_settings",
                 "openhuman.config_update_memory_settings",
                 "openhuman.config_update_model_settings",
@@ -1852,7 +1837,6 @@ async fn worker_a_controller_schemas_are_fully_exposed() {
                 "openhuman.config_update_sandbox_settings",
                 "openhuman.config_update_search_settings",
                 "openhuman.config_update_user_timezone",
-                "openhuman.config_update_voice_server_settings",
                 "openhuman.config_workspace_onboarding_flag_exists",
                 "openhuman.config_workspace_onboarding_flag_set",
             ],
@@ -2152,19 +2136,6 @@ async fn config_controller_mutations_round_trip_over_json_rpc() {
             }),
         ),
         (
-            10_009,
-            "openhuman.config_update_voice_server_settings",
-            json!({
-                "auto_start": false,
-                "hotkey": "Fn",
-                "activation_mode": "push",
-                "skip_cleanup": true,
-                "min_duration_secs": 0.25,
-                "silence_threshold": 0.01,
-                "custom_dictionary": ["OpenHuman", "WorkerA"]
-            }),
-        ),
-        (
             10_010,
             "openhuman.config_update_composio_trigger_settings",
             json!({
@@ -2215,7 +2186,6 @@ async fn config_controller_mutations_round_trip_over_json_rpc() {
         (10_103, "openhuman.config_get_dashboard_settings"),
         (10_104, "openhuman.config_agent_server_status"),
         (10_105, "openhuman.config_get_data_paths"),
-        (10_106, "openhuman.config_get_voice_server_settings"),
         (10_107, "openhuman.config_get_composio_trigger_settings"),
         (10_108, "openhuman.config_get_autonomy_settings"),
         (10_109, "openhuman.config_get_search_settings"),
@@ -2380,66 +2350,6 @@ async fn config_runtime_flags_settings_readbacks_and_validation_paths_are_exerci
         );
     }
 
-    ok(
-        &rpc(
-            &harness.rpc_base,
-            11_011,
-            "openhuman.config_update_dictation_settings",
-            json!({
-                "enabled": true,
-                "hotkey": "Ctrl+Space",
-                "activation_mode": "toggle",
-                "llm_refinement": false,
-                "streaming": true,
-                "streaming_interval_ms": 750
-            }),
-        )
-        .await,
-        "update_dictation_settings valid",
-    );
-    let dictation = rpc(
-        &harness.rpc_base,
-        11_012,
-        "openhuman.config_get_dictation_settings",
-        json!({}),
-    )
-    .await;
-    let dictation_payload = payload(&dictation, "get_dictation_settings");
-    assert_eq!(
-        dictation_payload
-            .get("activation_mode")
-            .and_then(Value::as_str),
-        Some("toggle")
-    );
-    assert_eq!(
-        dictation_payload
-            .get("streaming_interval_ms")
-            .and_then(Value::as_u64),
-        Some(750)
-    );
-
-    assert_error_contains(
-        &rpc(
-            &harness.rpc_base,
-            11_013,
-            "openhuman.config_update_dictation_settings",
-            json!({ "activation_mode": "hold" }),
-        )
-        .await,
-        "update_dictation_settings invalid activation",
-        "invalid activation_mode",
-    );
-    assert_error_contains(
-        &rpc(
-            &harness.rpc_base,
-            11_014,
-            "openhuman.config_update_voice_server_settings",
-            json!({ "activation_mode": "hold" }),
-        )
-        .await,
-        "update_voice_server_settings invalid activation",
-        "invalid activation_mode",
-    );
     assert_error_contains(
         &rpc(
             &harness.rpc_base,
@@ -2659,30 +2569,6 @@ async fn config_runtime_flags_settings_readbacks_and_validation_paths_are_exerci
         "reserved cloud providers already in config should be preserved once, not duplicated by echoed client payloads: {filtered_payload}"
     );
 
-    ok(
-        &rpc(
-            &harness.rpc_base,
-            11_019,
-            "openhuman.config_update_voice_server_settings",
-            json!({
-                "min_duration_secs": -1.0,
-                "silence_threshold": -0.5
-            }),
-        )
-        .await,
-        "update_voice_server_settings clamps non-negative floats",
-    );
-    let config = rpc(&harness.rpc_base, 11_020, "openhuman.config_get", json!({})).await;
-    let config_payload = payload(&config, "config_get after clamps");
-    assert_eq!(
-        config_payload.pointer("/config/voice_server/min_duration_secs"),
-        Some(&json!(0.0))
-    );
-    assert_eq!(
-        config_payload.pointer("/config/voice_server/silence_threshold"),
-        Some(&json!(0.0))
-    );
-
     harness.join.abort();
 }
 
@@ -2691,17 +2577,25 @@ async fn config_auto_approve_public_helper_persists_once_and_is_idempotent() {
     let _lock = env_lock_async().await;
     let tmp = tempdir().expect("tempdir");
     let home = tmp.path().join("home");
-    let _guards = [EnvVarGuard::set_to_path("HOME", &home),
+    let _guards = [
+        EnvVarGuard::set_to_path("HOME", &home),
         EnvVarGuard::unset("OPENHUMAN_WORKSPACE"),
         EnvVarGuard::unset(APP_ENV_VAR),
-        EnvVarGuard::unset(VITE_APP_ENV_VAR)];
+        EnvVarGuard::unset(VITE_APP_ENV_VAR),
+    ];
 
-    openhuman_core::config::add_auto_approve_tool("tool.config.round10")
-        .await
-        .expect("add auto approve tool");
-    openhuman_core::config::add_auto_approve_tool("tool.config.round10")
-        .await
-        .expect("idempotent auto approve tool");
+    openhuman_core::config::add_auto_approve_tool(
+        &DispatchCtx::process_default(),
+        "tool.config.round10",
+    )
+    .await
+    .expect("add auto approve tool");
+    openhuman_core::config::add_auto_approve_tool(
+        &DispatchCtx::process_default(),
+        "tool.config.round10",
+    )
+    .await
+    .expect("idempotent auto approve tool");
 
     let loaded = Config::load_or_init()
         .await

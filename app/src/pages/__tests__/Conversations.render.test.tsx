@@ -975,46 +975,6 @@ describe('Conversations — smoke render (#1123 welcome-lock removal)', () => {
     expect(vi.mocked(chatSend).mock.calls[0][0]).not.toHaveProperty('model');
   });
 
-  it('auto-sends a dictation transcript (autoSend) straight to chat without the composer', async () => {
-    const { thread } = await renderSelectedConversation();
-
-    // Hotkey dictation dispatches this event with autoSend:true (see
-    // useDictationHotkey). Conversations must route it directly to chatSend,
-    // bypassing the text composer.
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent('dictation://insert-text', {
-          detail: { text: '  play highway to hell  ', autoSend: true },
-        })
-      );
-    });
-
-    await waitFor(() => {
-      expect(chatSend).toHaveBeenCalledWith(
-        expect.objectContaining({
-          threadId: thread.id,
-          message: 'play highway to hell',
-          locale: 'en',
-          reasoningEffort: 'default',
-        })
-      );
-      expect(vi.mocked(chatSend).mock.calls[0][0]).not.toHaveProperty('model');
-    });
-  });
-
-  it('ignores a blank autoSend dictation event (no send)', async () => {
-    await renderSelectedConversation();
-    vi.mocked(chatSend).mockClear();
-
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent('dictation://insert-text', { detail: { text: '   ', autoSend: true } })
-      );
-    });
-
-    expect(chatSend).not.toHaveBeenCalled();
-  });
-
   it('blocks duplicate sends while the first send is still pending', async () => {
     let resolveSend: (() => void) | undefined;
     vi.mocked(chatSend).mockImplementationOnce(
@@ -2059,7 +2019,7 @@ describe('Conversations — smoke render (#1123 welcome-lock removal)', () => {
     }
   });
 
-  it('words the silence warning for a running step when a tool is in flight', async () => {
+  it('warns the turn may be stuck when nothing is running past the window', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { textarea, store, thread } = await renderSelectedConversation();
@@ -2087,7 +2047,73 @@ describe('Conversations — smoke render (#1123 welcome-lock removal)', () => {
 
       const warning = await screen.findByTestId('chat-stall-warning');
       expect(warning).toHaveAttribute('data-chat-stall-phase', 'tool_use');
-      expect(warning).toHaveTextContent('Still working');
+      expect(warning).toHaveTextContent('No new output for');
+      expect(store!.getState().thread.activeThreadIds[thread.id]).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names a still-running tool instead of warning the turn is stuck', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { textarea, store, thread } = await renderSelectedConversation();
+      await act(async () => {
+        setComposerText(textarea, 'run a slow shell loop');
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+      });
+      await waitFor(() => {
+        expect(chatSend).toHaveBeenCalledTimes(1);
+      });
+      await act(async () => {
+        store!.dispatch(
+          setInferenceStatusForThread({
+            threadId: thread.id,
+            status: { phase: 'tool_use', iteration: 2, maxIterations: 8 },
+          })
+        );
+      });
+
+      await act(async () => {
+        store!.dispatch(
+          setToolTimelineForThread({
+            threadId: thread.id,
+            entries: [
+              {
+                id: 'tl-shell',
+                name: 'shell',
+                round: 2,
+                seq: 0,
+                status: 'running',
+                argsBuffer: '{"command":"cargo build"}',
+              },
+              // A detached run from an earlier turn, hydrated from the run
+              // ledger after this turn's call: issued later, still running,
+              // but not this turn's work.
+              {
+                id: 'subagent:run-old',
+                name: 'subagent:researcher',
+                round: 0,
+                seq: 1,
+                status: 'running',
+                sourceToolName: 'run_ledger',
+              },
+            ],
+          })
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+
+      const warning = await screen.findByTestId('chat-stall-warning');
+      expect(warning).toHaveAttribute('data-chat-stall-phase', 'tool_use');
+      expect(warning).toHaveAttribute('data-chat-stall-state', 'tool');
+      expect(warning).toHaveTextContent('Running command.');
+      expect(warning).not.toHaveTextContent('may be stuck');
       expect(store!.getState().thread.activeThreadIds[thread.id]).toBe(true);
     } finally {
       vi.useRealTimers();

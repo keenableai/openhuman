@@ -2,7 +2,7 @@
 //!
 //! `skills_run` runs the orchestrator (and any sub-agents it spawns) as an
 //! unattended background tree: it isn't approval-gated (background turns carry
-//! no `APPROVAL_CHAT_CONTEXT`), and the per-agent iteration cap is lifted so the
+//! no chat approval context), and the per-agent iteration cap is lifted so the
 //! run continues until it's done or the repeated-failure circuit breaker trips.
 //!
 //! The lifted cap rides `OpenHumanRunContext::autonomous_iter_cap`, set by
@@ -39,7 +39,7 @@ pub fn subagent_iter_cap_with_autonomous_lift(autonomous_cap: Option<usize>, bas
 /// A definition's iteration cap under the run context's autonomous lift.
 pub fn definition_iter_cap(
     run_context: &crate::agent::tinyagents::host::OpenHumanRunContext,
-    definition: &crate::agent::harness::host_definition::AgentDefinition,
+    definition: &crate::agent_registry::host_definition::AgentDefinition,
 ) -> usize {
     subagent_iter_cap_with_autonomous_lift(
         run_context.autonomous_iter_cap,

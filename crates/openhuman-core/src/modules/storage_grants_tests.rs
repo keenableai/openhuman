@@ -8,6 +8,8 @@ fn grant() -> StorageGrant {
         blob_prefixes: vec!["files/".into()],
         secret_prefixes: vec!["token.".into()],
         writable: true,
+        queues: None,
+        queue_backend: None,
     }
 }
 
@@ -138,7 +140,14 @@ fn capabilities_are_answered_for_an_object_the_grant_does_not_hold() {
         writable: true,
         ..StorageGrant::default()
     };
-    assert!(authorize(&documents_only, Object::Blobs, "Capabilities", &json!(null)).is_ok());
+    assert_eq!(
+        authorize(&documents_only, Object::Blobs, "Capabilities", &json!({})),
+        Ok(Plan::Answer(json!({
+            "presigned_urls": false,
+            "ttl": false,
+            "max_key_len": 0,
+        })))
+    );
     // Anything else on that object is still refused.
     assert_eq!(
         authorize(
@@ -285,24 +294,52 @@ fn schema_is_the_hosts_to_change() {
 }
 
 #[test]
-fn streamed_blobs_and_watches_are_refused_as_unsupported() {
+fn streamed_blobs_and_watches_follow_the_grant() {
     let g = grant();
-    assert_eq!(
+    // A streamed upload is a write to a granted blob prefix; a download a read.
+    assert!(matches!(
         authorize(&g, Object::Blobs, "PutStream", &json!({"key": "files/a"})),
-        Err(Denied::Unsupported)
-    );
-    assert_eq!(
+        Ok(Plan::Forward { write: true, .. })
+    ));
+    assert!(matches!(
         authorize(&g, Object::Blobs, "GetStream", &json!({"key": "files/a"})),
-        Err(Denied::Unsupported)
-    );
+        Ok(Plan::Forward { write: false, .. })
+    ));
+    for selector in ["PutStream", "GetStream"] {
+        assert_eq!(
+            authorize(&g, Object::Blobs, selector, &json!({"key": "elsewhere/a"})),
+            Err(Denied::Target),
+            "{selector}"
+        );
+    }
+    let mut read_only = grant();
+    read_only.writable = false;
     assert_eq!(
+        authorize(
+            &read_only,
+            Object::Blobs,
+            "PutStream",
+            &json!({"key": "files/a"})
+        ),
+        Err(Denied::ReadOnly)
+    );
+    assert!(matches!(
         authorize(
             &g,
             Object::Documents,
             "WatchOpen",
             &json!({"collection": "notes"})
         ),
-        Err(Denied::Unsupported)
+        Ok(Plan::Forward { write: false, .. })
+    ));
+    assert_eq!(
+        authorize(
+            &g,
+            Object::Documents,
+            "WatchOpen",
+            &json!({"collection": "not_mine"})
+        ),
+        Err(Denied::Target)
     );
 }
 
@@ -361,6 +398,7 @@ fn only_modules_with_a_declared_grant_have_storage() {
                     | "tinychannels"
                     | "tinyconnectors"
                     | "tinywallet"
+                    | "tinyeventqueues"
                     | "tinybox"
                     | "tinyjuice"
             ),
@@ -420,11 +458,12 @@ fn only_mutating_selectors_ask_for_the_write_fence() {
 #[test]
 fn the_write_selectors_track_the_contract_selector_sets() {
     use tinystoragedrivers_bus as wire;
-    let all: [(Object, &[&str]); 4] = [
+    let all: [(Object, &[&str]); 5] = [
         (Object::Documents, &wire::DOCUMENTS_SELECTORS),
         (Object::Streams, &wire::STREAMS_SELECTORS),
         (Object::Blobs, &wire::BLOBS_SELECTORS),
         (Object::Secrets, &wire::SECRETS_SELECTORS),
+        (Object::Queues, &wire::QUEUES_SELECTORS),
     ];
     let mut writes: Vec<String> = Vec::new();
     for (object, selectors) in all {
@@ -443,12 +482,21 @@ fn the_write_selectors_track_the_contract_selector_sets() {
             "Blobs.Delete",
             "Blobs.PresignPut",
             "Blobs.Put",
+            "Blobs.PutStream",
             "Documents.AtomicBatch",
             "Documents.AtomicBatchChecked",
             "Documents.Claim",
             "Documents.Delete",
             "Documents.DeleteWhere",
             "Documents.Put",
+            "Queues.Ack",
+            "Queues.Enqueue",
+            "Queues.EnsureQueue",
+            "Queues.Extend",
+            "Queues.Nack",
+            "Queues.Purge",
+            "Queues.Receive",
+            "Queues.Redrive",
             "Secrets.Delete",
             "Secrets.Set",
             "Streams.Append",
@@ -457,5 +505,25 @@ fn the_write_selectors_track_the_contract_selector_sets() {
             "Streams.DeleteStream",
             "Streams.TruncateBefore",
         ]
+    );
+}
+
+/// The inbound event queues' grant is derived from their contract schema
+/// (the `teq.*` collections, with indexes) and carries the configured queue
+/// manifest, so the module can use both documents and queues.
+#[cfg(feature = "inbound-queues")]
+#[test]
+fn the_event_queues_grant_carries_their_collections_and_queues() {
+    let grant = declared("tinyeventqueues").expect("a grant");
+    assert!(grant.validate().is_ok());
+    assert_eq!(
+        grant.collections,
+        tinyeventqueues_bus::storage::collection_specs()
+    );
+    let manifest = grant.queues.expect("a queue manifest");
+    assert!(manifest.get("teq.ingress").is_some());
+    assert_eq!(
+        grant.queue_backend,
+        Some(tinystoragedrivers::QueueConfig::Storage)
     );
 }

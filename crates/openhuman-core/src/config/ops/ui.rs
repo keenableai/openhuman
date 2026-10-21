@@ -1,12 +1,13 @@
-//! UI-facing config operations: browser, analytics, dictation, voice server,
-//! onboarding flags. Search settings live in `search.rs`.
+//! UI-facing config operations: browser, analytics, and onboarding flags.
+//! Search settings live in `search.rs`.
 
+use crate::core::runtime::DispatchCtx;
 use serde_json::json;
 
 use crate::config::Config;
 use crate::core::Outcome;
 
-use super::loader::{fallback_workspace_dir, load_config_with_timeout, snapshot_config_json};
+use super::loader::{fallback_workspace_dir, snapshot_config_json};
 
 #[derive(Debug, Clone, Default)]
 pub struct BrowserSettingsPatch {
@@ -27,32 +28,6 @@ pub struct BrowserSettingsPatch {
 #[derive(Debug, Clone, Default)]
 pub struct AnalyticsSettingsPatch {
     pub enabled: Option<bool>,
-}
-
-/// Represents a partial update to dictation-related settings.
-pub struct DictationSettingsPatch {
-    pub enabled: Option<bool>,
-    pub hotkey: Option<String>,
-    pub activation_mode: Option<String>,
-    pub llm_refinement: Option<bool>,
-    pub streaming: Option<bool>,
-    pub streaming_interval_ms: Option<u64>,
-}
-
-/// Represents a partial update to voice server related settings.
-pub struct VoiceServerSettingsPatch {
-    pub auto_start: Option<bool>,
-    pub hotkey: Option<String>,
-    pub activation_mode: Option<String>,
-    pub skip_cleanup: Option<bool>,
-    pub min_duration_secs: Option<f32>,
-    pub silence_threshold: Option<f32>,
-    pub custom_dictionary: Option<Vec<String>>,
-    pub always_on_enabled: Option<bool>,
-    pub wake_word: Option<String>,
-    /// Hosted STT engine name — `"backend"` / `"elevenlabs"` / `"openai"`
-    /// (the `"cloud"` / `"openhuman"` aliases also resolve to backend).
-    pub stt_engine: Option<String>,
 }
 
 /// Updates the browser-related settings in the configuration.
@@ -122,7 +97,7 @@ pub async fn apply_browser_settings(
         browser.learn_from_tasks = learn;
     }
     config.browser = browser;
-    config.save().await.map_err(|e| e.to_string())?;
+    config.save().await.map_err(super::config_save_error)?;
     // Tools built before the switch hold the config they were built with.
     #[cfg(feature = "modules")]
     if let Some(learn) = update.learn_from_tasks {
@@ -163,9 +138,10 @@ fn normalize_browser_backend(raw: &str) -> Result<String, String> {
 
 /// Loads the configuration, applies browser settings updates, and saves it.
 pub async fn load_and_apply_browser_settings(
+    ctx: &DispatchCtx,
     update: BrowserSettingsPatch,
 ) -> Result<Outcome<serde_json::Value>, String> {
-    let mut config = load_config_with_timeout().await?;
+    let mut config = ctx.load_config().await?;
     apply_browser_settings(&mut config, update).await
 }
 
@@ -177,7 +153,7 @@ pub async fn apply_analytics_settings(
     if let Some(enabled) = update.enabled {
         config.observability.analytics_enabled = enabled;
     }
-    config.save().await.map_err(|e| e.to_string())?;
+    config.save().await.map_err(super::config_save_error)?;
     let snapshot = snapshot_config_json(config)?;
     Ok(Outcome::new(
         snapshot,
@@ -215,7 +191,7 @@ pub async fn apply_user_timezone(
     };
     if let Err(error) = config.save().await {
         config.user_timezone = previous;
-        return Err(error.to_string());
+        return Err(super::config_save_error(error));
     }
     let chosen = config.user_timezone.as_deref().unwrap_or("device");
     log::info!("[config] user time zone set: {chosen}");
@@ -230,9 +206,10 @@ pub async fn apply_user_timezone(
 
 /// Loads the configuration, sets the user's time zone, and saves it.
 pub async fn load_and_apply_user_timezone(
+    ctx: &DispatchCtx,
     timezone: Option<String>,
 ) -> Result<Outcome<serde_json::Value>, String> {
-    let mut config = load_config_with_timeout().await?;
+    let mut config = ctx.load_config().await?;
     apply_user_timezone(&mut config, timezone).await
 }
 
@@ -247,14 +224,16 @@ pub fn user_timezone_json(config: &Config) -> serde_json::Value {
 
 /// Loads the configuration, applies analytics settings updates, and saves it.
 pub async fn load_and_apply_analytics_settings(
+    ctx: &DispatchCtx,
     update: AnalyticsSettingsPatch,
 ) -> Result<Outcome<serde_json::Value>, String> {
-    let mut config = load_config_with_timeout().await?;
+    let mut config = ctx.load_config().await?;
     apply_analytics_settings(&mut config, update).await
 }
 
 /// Resolves a workspace onboarding flag, creating or checking its existence.
 pub async fn workspace_onboarding_flag_resolve(
+    ctx: &DispatchCtx,
     flag_name: Option<String>,
     default_name: &str,
 ) -> Result<Outcome<bool>, String> {
@@ -267,7 +246,7 @@ pub async fn workspace_onboarding_flag_resolve(
     {
         return Err("Invalid onboarding flag name".to_string());
     }
-    let workspace_dir = match load_config_with_timeout().await {
+    let workspace_dir = match ctx.load_config().await {
         Ok(cfg) => cfg.workspace_dir,
         Err(_) => fallback_workspace_dir(),
     };
@@ -295,6 +274,7 @@ pub fn workspace_onboarding_flag_exists(
 
 /// Creates or removes an onboarding flag file in the workspace.
 pub async fn workspace_onboarding_flag_set(
+    ctx: &DispatchCtx,
     flag_name: Option<String>,
     default_name: &str,
     value: bool,
@@ -308,7 +288,7 @@ pub async fn workspace_onboarding_flag_set(
     {
         return Err("Invalid onboarding flag name".to_string());
     }
-    let workspace_dir = match load_config_with_timeout().await {
+    let workspace_dir = match ctx.load_config().await {
         Ok(cfg) => cfg.workspace_dir,
         Err(_) => fallback_workspace_dir(),
     };
@@ -331,8 +311,8 @@ pub async fn workspace_onboarding_flag_set(
 }
 
 /// Returns whether the onboarding process has been marked as completed.
-pub async fn get_onboarding_completed() -> Result<Outcome<bool>, String> {
-    let config = load_config_with_timeout().await?;
+pub async fn get_onboarding_completed(ctx: &DispatchCtx) -> Result<Outcome<bool>, String> {
+    let config = ctx.load_config().await?;
     Ok(Outcome::single_log(
         config.onboarding_completed,
         "onboarding_completed read from config",
@@ -343,13 +323,16 @@ pub async fn get_onboarding_completed() -> Result<Outcome<bool>, String> {
 ///
 /// On a false→true transition, seeds the recurring morning-briefing
 /// cron job via [`crate::cron::seed::seed_proactive_agents`].
-pub async fn set_onboarding_completed(value: bool) -> Result<Outcome<bool>, String> {
+pub async fn set_onboarding_completed(
+    ctx: &DispatchCtx,
+    value: bool,
+) -> Result<Outcome<bool>, String> {
     tracing::debug!(value, "[onboarding] set_onboarding_completed called");
-    let mut config = load_config_with_timeout().await?;
+    let mut config = ctx.load_config().await?;
     let was_completed = config.onboarding_completed;
     config.onboarding_completed = value;
 
-    config.save().await.map_err(|e| e.to_string())?;
+    config.save().await.map_err(super::config_save_error)?;
 
     if value && !was_completed {
         tracing::debug!(
@@ -372,153 +355,5 @@ pub async fn set_onboarding_completed(value: bool) -> Result<Outcome<bool>, Stri
     Ok(Outcome::single_log(
         config.onboarding_completed,
         "onboarding_completed saved to config",
-    ))
-}
-
-/// Returns the current dictation settings as a JSON object.
-pub async fn get_dictation_settings() -> Result<Outcome<serde_json::Value>, String> {
-    let config = load_config_with_timeout().await?;
-    let result = json!({
-        "enabled": config.dictation.enabled,
-        "hotkey": config.dictation.hotkey,
-        "activation_mode": config.dictation.activation_mode,
-        "llm_refinement": config.dictation.llm_refinement,
-        "streaming": config.dictation.streaming,
-        "streaming_interval_ms": config.dictation.streaming_interval_ms,
-    });
-    Ok(Outcome::new(
-        result,
-        vec!["dictation settings read".to_string()],
-    ))
-}
-
-/// Loads configuration, applies dictation settings updates, and saves it.
-pub async fn load_and_apply_dictation_settings(
-    update: DictationSettingsPatch,
-) -> Result<Outcome<serde_json::Value>, String> {
-    let mut config = load_config_with_timeout().await?;
-    if let Some(enabled) = update.enabled {
-        config.dictation.enabled = enabled;
-    }
-    if let Some(hotkey) = update.hotkey {
-        config.dictation.hotkey = hotkey;
-    }
-    if let Some(mode) = update.activation_mode {
-        match mode.as_str() {
-            "toggle" => {
-                config.dictation.activation_mode = crate::config::DictationActivationMode::Toggle;
-            }
-            "push" => {
-                config.dictation.activation_mode = crate::config::DictationActivationMode::Push;
-            }
-            _ => {
-                return Err(format!(
-                    "invalid activation_mode: {mode} (valid: toggle, push)"
-                ))
-            }
-        }
-    }
-    if let Some(llm_refinement) = update.llm_refinement {
-        config.dictation.llm_refinement = llm_refinement;
-    }
-    if let Some(streaming) = update.streaming {
-        config.dictation.streaming = streaming;
-    }
-    if let Some(interval) = update.streaming_interval_ms {
-        config.dictation.streaming_interval_ms = interval;
-    }
-    config.save().await.map_err(|e| e.to_string())?;
-    let snapshot = snapshot_config_json(&config)?;
-    Ok(Outcome::new(
-        snapshot,
-        vec![format!(
-            "dictation settings saved to {}",
-            config.config_path.display()
-        )],
-    ))
-}
-
-/// Returns the current voice server settings as a JSON object.
-pub async fn get_voice_server_settings() -> Result<Outcome<serde_json::Value>, String> {
-    let config = load_config_with_timeout().await?;
-    let result = json!({
-        "auto_start": config.voice_server.auto_start,
-        "hotkey": config.voice_server.hotkey,
-        "activation_mode": config.voice_server.activation_mode,
-        "skip_cleanup": config.voice_server.skip_cleanup,
-        "min_duration_secs": config.voice_server.min_duration_secs,
-        "silence_threshold": config.voice_server.silence_threshold,
-        "custom_dictionary": config.voice_server.custom_dictionary,
-        "always_on_enabled": config.voice_server.always_on_enabled,
-        "wake_word": config.voice_server.wake_word,
-        "stt_engine": config.voice_server.stt_engine,
-    });
-    Ok(Outcome::new(
-        result,
-        vec!["voice server settings read".to_string()],
-    ))
-}
-
-/// Loads configuration, applies voice server settings updates, and saves it.
-pub async fn load_and_apply_voice_server_settings(
-    update: VoiceServerSettingsPatch,
-) -> Result<Outcome<serde_json::Value>, String> {
-    let mut config = load_config_with_timeout().await?;
-    if let Some(auto_start) = update.auto_start {
-        config.voice_server.auto_start = auto_start;
-    }
-    if let Some(hotkey) = update.hotkey {
-        config.voice_server.hotkey = hotkey;
-    }
-    if let Some(mode) = update.activation_mode {
-        match mode.as_str() {
-            "tap" => {
-                config.voice_server.activation_mode = crate::config::VoiceActivationMode::Tap;
-            }
-            "push" => {
-                config.voice_server.activation_mode = crate::config::VoiceActivationMode::Push;
-            }
-            _ => {
-                return Err(format!(
-                    "invalid activation_mode: {mode} (valid: tap, push)"
-                ))
-            }
-        }
-    }
-    if let Some(skip_cleanup) = update.skip_cleanup {
-        config.voice_server.skip_cleanup = skip_cleanup;
-    }
-    if let Some(min_duration_secs) = update.min_duration_secs {
-        config.voice_server.min_duration_secs = min_duration_secs.max(0.0);
-    }
-    if let Some(silence_threshold) = update.silence_threshold {
-        config.voice_server.silence_threshold = silence_threshold.max(0.0);
-    }
-    if let Some(custom_dictionary) = update.custom_dictionary {
-        config.voice_server.custom_dictionary = custom_dictionary;
-    }
-    if let Some(always_on_enabled) = update.always_on_enabled {
-        config.voice_server.always_on_enabled = always_on_enabled;
-    }
-    if let Some(wake_word) = update.wake_word {
-        config.voice_server.wake_word = wake_word.trim().to_string();
-    }
-    if let Some(engine) = update.stt_engine {
-        // Reject rather than silently defaulting: an unknown engine name means
-        // the caller and the core disagree about what is available, and quietly
-        // routing to the backend proxy would bill the wrong account.
-        let parsed = crate::config::SttEngine::parse(&engine).ok_or_else(|| {
-            format!("invalid stt_engine: {engine} (valid: backend, elevenlabs, openai)")
-        })?;
-        config.voice_server.stt_engine = parsed;
-    }
-    config.save().await.map_err(|e| e.to_string())?;
-    let snapshot = snapshot_config_json(&config)?;
-    Ok(Outcome::new(
-        snapshot,
-        vec![format!(
-            "voice server settings saved to {}",
-            config.config_path.display()
-        )],
     ))
 }

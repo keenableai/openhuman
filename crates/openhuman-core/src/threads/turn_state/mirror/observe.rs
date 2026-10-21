@@ -5,7 +5,7 @@
 //! `tinyagents_session::turn_state::TurnStateMirror`; this is the host-side
 //! progress projection over it.
 
-use crate::agent::progress::AgentProgress;
+use crate::progress::AgentProgress;
 use crate::threads::turn_state::rpc_types::persisted_tool_failure;
 
 use tinyagents_session::turn_state::mirror::caps::{cap_persisted_args, cap_persisted_output};
@@ -462,6 +462,12 @@ impl ObserveProgress for TurnStateMirror {
             AgentProgress::TurnContent { .. } => {
                 // Prompt/reply content is consumed by the tracing exporter, not
                 // the turn-state snapshot; nothing to mirror, no flush.
+                false
+            }
+            AgentProgress::ToolCallProgress { .. } => {
+                // A running tool's status line is live-only (`tool_progress`
+                // on the socket); the snapshot already shows the call as
+                // running, so a flush per beat would buy nothing.
                 false
             }
         }

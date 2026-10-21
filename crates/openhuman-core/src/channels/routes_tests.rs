@@ -85,6 +85,7 @@ fn runtime_context(workspace_dir: PathBuf) -> ChannelRuntimeContext {
         multimodal: crate::config::MultimodalConfig::default(),
         multimodal_files: crate::config::MultimodalFileConfig::default(),
         config: None,
+        core: None,
     }
 }
 
@@ -197,8 +198,11 @@ async fn cached_models_and_help_responses_render_expected_text() {
 
     let models = module_route_help_response(tempdir.path(), "/model", Vec::new()).await;
     assert!(models.contains("Current provider: `openai`"));
-    assert!(models.contains("Cached model IDs"));
-    assert!(models.contains("- `gpt-5-mini`"));
+    // The module no longer reads `models_cache.json` (tinychannels 0.1.38):
+    // a catalog-less channel points the user at the web UI instead of listing
+    // a possibly stale workspace file.
+    assert!(models.contains("Model catalog is unavailable in this channel"));
+    assert!(!models.contains("gpt-5-mini"));
 
     let providers = module_route_help_response(
         tempdir.path(),
@@ -245,7 +249,10 @@ async fn sign_out_cancels_remote_invalidation_while_it_waits_for_the_session_tab
         crate::core::runtime::CoreContext::for_test(crate::core::runtime::DomainSet::full(), None);
     let expected_core_context = Arc::clone(&core_context);
     crate::core::runtime::CoreContext::scope(core_context, async {
-        let guard = crate::web_chat::lock_thread_sessions_for_test().await;
+        let guard = crate::web_chat::lock_thread_sessions_for_test(
+            &crate::core::runtime::DispatchCtx::ambient(),
+        )
+        .await;
         let cancellation = tokio_util::sync::CancellationToken::new();
         let callback = RouteCallbacks::new(
             runtime_context(PathBuf::from("/tmp/channel-callback")),
@@ -297,7 +304,7 @@ async fn load_cached_model_preview_returns_empty_when_cache_json_is_invalid() {
     .unwrap();
 
     let response = module_route_help_response(tempdir.path(), "/model", Vec::new()).await;
-    assert!(response.contains("No cached model list found for `openai`"));
+    assert!(response.contains("Model catalog is unavailable in this channel for `openai`"));
 }
 
 #[tokio::test]
@@ -632,4 +639,50 @@ async fn handle_runtime_command_telegram_new_status_and_sessions_round_trip() {
     assert!(sent
         .iter()
         .all(|message| message.thread_ts.as_deref() == Some("42")));
+}
+
+#[tokio::test]
+async fn handle_runtime_command_telegram_new_reports_unavailable_storage() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let ctx = runtime_context(tempdir.path().to_path_buf());
+    let channel_impl = Arc::new(RecordingChannel::default());
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+    let sender_key = "telegram_alice_chat-remote";
+
+    ctx.conversation_histories.lock().unwrap().insert(
+        sender_key.to_string(),
+        vec![ChatMessage::user("old history")],
+    );
+
+    let msg = ChannelMessage {
+        id: "1".into(),
+        sender: "alice".into(),
+        reply_target: "chat-remote".into(),
+        content: "/new".into(),
+        channel: "telegram".into(),
+        timestamp: 0,
+        thread_ts: Some("42".into()),
+        sender_name: None,
+    };
+    assert!(
+        handle_runtime_command_if_needed(
+            &ctx,
+            &msg,
+            Some(&channel),
+            &conversation_history_key(&msg)
+        )
+        .await
+    );
+    let sent = channel_impl.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].content.contains("Created thread"),
+        "{}",
+        sent[0].content
+    );
+    assert!(sent[0]
+        .content
+        .contains("failed to persist the chat binding"));
+    assert!(sent[0].content.contains("host storage is unavailable"));
+    assert_eq!(sent[0].thread_ts.as_deref(), Some("42"));
 }

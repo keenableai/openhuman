@@ -24,16 +24,15 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use tinyagents_harness::context::RunContext;
-use tinyagents_harness::runtime::{AgentHarness, InvalidArgsPolicy, RunPolicy, UnknownToolPolicy};
 use tinyagents_harness::summarization::payload_summarizer::{
-    summary_child_config, PayloadSummarizer as HarnessPayloadSummarizer,
+    run_unary_summary, summary_child_config, PayloadSummarizer as HarnessPayloadSummarizer,
 };
-use tinyinference_llm::message::Message;
+use tinyagents_orchestration::subagent::{subagent_framing, SubagentRole};
 use tracing::debug;
 
-use crate::agent::harness::host_definition::AgentDefinition;
 use crate::agent::subagent_host;
 use crate::agent::tinyagents::host::OpenHumanRunContext;
+use crate::agent_registry::host_definition::AgentDefinition;
 use {
     crate::inference::tokenjuice::generate::PreparedGenerate, tinyjuice_bus::wire::GenerateRequest,
 };
@@ -109,15 +108,18 @@ impl HarnessPayloadSummarizer<OpenHumanRunContext> for SubagentPayloadSummarizer
             definition.max_iterations,
             max_output_tokens,
         )?;
+        let summary_depth = child_context.depth();
         debug!(
             agent = %definition.id,
             parent_depth = parent_ctx.depth(),
             "[payload_summarizer] prepared a summary call under the parent turn"
         );
 
+        let dispatch = parent_ctx.data.dispatch_ctx();
         Ok(Box::new(move |request: GenerateRequest| {
+            let dispatch = dispatch.clone();
             Box::pin(async move {
-                let config_loaded = crate::config::ops::load_current_or_init().await;
+                let config_loaded = crate::config::ops::load_current_or_init(&dispatch).await;
                 let (source, model) = subagent_host::resolve_subagent_source(
                     &definition.model,
                     &definition.id,
@@ -129,18 +131,9 @@ impl HarnessPayloadSummarizer<OpenHumanRunContext> for SubagentPayloadSummarizer
                     definition.temperature,
                 );
                 let max_output_tokens = request.max_output_tokens.min(max_output_tokens).max(1);
-                let system_prompt =
-                    subagent_host::append_subagent_role_contract(request.system, &definition.id);
+                let framing = subagent_framing(SubagentRole::Leaf, summary_depth, &request.prompt);
+                let system_prompt = format!("{}\n\n{framing}", request.system.trim_end());
 
-                let mut policy = RunPolicy::default();
-                policy.limits.max_model_calls = definition.max_iterations;
-                policy.limits.max_tool_calls = definition.max_iterations.saturating_mul(8).max(8);
-                policy.retry.max_attempts = 1;
-                policy.unknown_tool = UnknownToolPolicy::ReturnToolError;
-                policy.invalid_args = InvalidArgsPolicy::ReturnToolError;
-
-                let mut harness: AgentHarness<(), OpenHumanRunContext> = AgentHarness::new();
-                harness.with_policy(policy);
                 let provider_model = tinyinference_llm::model::MaxTokensModel::new(
                     source.build_summarizer(
                         &model,
@@ -155,27 +148,17 @@ impl HarnessPayloadSummarizer<OpenHumanRunContext> for SubagentPayloadSummarizer
                     Some(budget) => budget.wrap(provider_model),
                     None => provider_model,
                 };
-                harness
-                    .register_model(&model, provider_model)
-                    .set_default_model(&model);
-
-                // Unary, never streaming. A chat turn's parent is streaming, and
-                // a streaming child would put its deltas on the shared event
-                // sink as parent `TextDelta`s — the web bridge then published
-                // the internal summary to the user as an interim message.
-                // `invoke_in_context` pins the child to the unary path; the
-                // summary's only consumer is `run.text()` below.
-                let run = harness
-                    .invoke_in_context(
-                        &(),
-                        child_context,
-                        vec![
-                            Message::system(system_prompt),
-                            Message::user(request.prompt),
-                        ],
-                    )
-                    .await?;
-                Ok(run.text().unwrap_or_default())
+                // Unary, never streaming: a streaming child would publish the
+                // internal summary to the user as parent `TextDelta`s.
+                Ok(run_unary_summary(
+                    child_context,
+                    &model,
+                    provider_model,
+                    definition.max_iterations,
+                    system_prompt,
+                    request.prompt,
+                )
+                .await?)
             })
         }))
     }

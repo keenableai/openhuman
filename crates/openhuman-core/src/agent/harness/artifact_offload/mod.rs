@@ -48,10 +48,11 @@
 
 pub mod policy;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use tinyagents_harness::artifacts::ArtifactOffload;
+use tinystoragedrivers::BlobStore;
 
 use crate::security::SecurityPolicy;
 
@@ -64,7 +65,7 @@ use crate::security::SecurityPolicy;
 pub const OFFLOAD_WRITE_TOOL: &str = "file_write";
 
 pub use policy::{SanitizingRedactor, WorkspaceGuard};
-use tinyagents_harness::artifacts::OffloadedArtifact;
+use tinyagents_harness::artifacts::{ArtifactKind, OffloadedArtifact};
 
 /// Tool OpenHuman tells a parent to open an offloaded artifact with.
 ///
@@ -77,19 +78,20 @@ use tinyagents_harness::artifacts::OffloadedArtifact;
 /// its agent actually holds, and the reader and the writer are different agents.
 pub const READ_TOOL: &str = "file_read";
 
-/// Build a writer for one sub-agent run, wired to OpenHuman's policies.
+/// Build a writer for one sub-agent run over `blobs`, wired to OpenHuman's
+/// policies.
 ///
 /// Supplies both host policies every time, so no call site can accidentally
 /// construct an unguarded or unredacted writer — the crate permits `None` for
 /// each, and OpenHuman never wants either.
 pub fn new_artifact_offload(
-    action_dir: PathBuf,
+    blobs: Arc<dyn BlobStore>,
     policy: Option<Arc<SecurityPolicy>>,
     agent_id: impl Into<String>,
     task_id: impl Into<String>,
 ) -> ArtifactOffload {
-    let offload = ArtifactOffload::new(action_dir, agent_id, task_id)
-        .with_redactor(Arc::new(SanitizingRedactor));
+    let offload =
+        ArtifactOffload::new(blobs, agent_id, task_id).with_redactor(Arc::new(SanitizingRedactor));
     match policy {
         Some(policy) => offload.with_path_policy(Arc::new(WorkspaceGuard::new(policy))),
         // No policy means the workspace checks are skipped; traversal and
@@ -102,19 +104,90 @@ pub fn new_artifact_offload(
 /// Offload `output` when it exceeds `threshold_bytes`, returning the text the
 /// parent should receive plus the artifact when one was written.
 ///
-/// Thin wrapper over the crate's function that pins OpenHuman's [`READ_TOOL`].
-/// Every failure mode is soft: the caller gets the original payload back and
-/// the summarizer detour and tool-result budget stay in charge as the fallback.
+/// The artifact lives on the blob store, but the parent opens it with
+/// [`READ_TOOL`], which reads the filesystem. So the stored body is also
+/// materialised at `materialize_root/<key>` (the parent's action root), which
+/// is the path the pointer quotes. Every failure mode is soft: the caller gets
+/// the original payload back and the summarizer detour and tool-result budget
+/// stay in charge as the fallback. A pointer is never returned for a file that
+/// could not be written.
 pub async fn offload_oversized_result(
     output: String,
     offload: &ArtifactOffload,
     threshold_bytes: usize,
+    materialize_root: &Path,
+    policy: Option<&SecurityPolicy>,
 ) -> (String, Option<OffloadedArtifact>) {
-    tinyagents_harness::artifacts::offload_oversized_result(
-        output,
+    // Public callers may pair this explicit policy with an ArtifactOffload
+    // configured under a different policy (or no path policy at all). Keep
+    // OpenHuman's workspace-internal floor before the owner writes any blob.
+    if let Some(policy) = policy {
+        if let Ok(key) = offload.resolve(ArtifactKind::Output, &offload.default_result_name()) {
+            let target = materialize_root.join(key);
+            if policy.is_workspace_internal_path(&target)
+                || target.starts_with(&policy.workspace_dir)
+            {
+                tracing::warn!(path = %target.display(), "[artifact] materialized target reaches workspace state; keeping the inline result");
+                return (output, None);
+            }
+        }
+    }
+
+    // The owner's filesystem-aware offload validates the eventual target
+    // before storing bytes, then writes and materializes through its policy.
+    let (pointer, artifact) = tinyagents_harness::artifacts::offload_oversized_result_to_fs(
+        output.clone(),
         offload,
         threshold_bytes,
         READ_TOOL,
+        materialize_root,
+    )
+    .await;
+    if artifact.is_some() {
+        (pointer, artifact)
+    } else {
+        (output, None)
+    }
+}
+
+/// Offload one finished sub-agent run's `output` for the tenant in scope: the
+/// artifact goes to its blob store and is materialised under the policy's
+/// action root (`action_dir` without a policy), the parent's root.
+///
+/// With no blob store for the tenant (a SaaS task with no scope, a refused
+/// backend) nothing is offloaded and `output` comes back untouched, like every
+/// other soft failure.
+pub async fn offload_run_result(
+    output: String,
+    policy: Option<Arc<SecurityPolicy>>,
+    action_dir: std::path::PathBuf,
+    agent_id: String,
+    task_id: &str,
+    threshold_bytes: usize,
+) -> (String, Option<OffloadedArtifact>) {
+    let materialize_root = policy
+        .as_ref()
+        .map(|p| p.action_dir.clone())
+        .unwrap_or_else(|| action_dir.clone());
+    let workspace_dir = policy
+        .as_ref()
+        .map(|p| p.workspace_dir.clone())
+        .unwrap_or(action_dir);
+    let Some(blobs) = crate::storage::sessions::artifact_blobs_for(&workspace_dir) else {
+        tracing::debug!(
+            task_id = %task_id,
+            agent_id = %agent_id,
+            "[artifact] no blob store for the acting tenant — skipping offload (summarizer/truncation backstop applies)"
+        );
+        return (output, None);
+    };
+    let offload = new_artifact_offload(blobs, policy.clone(), agent_id, task_id);
+    offload_oversized_result(
+        output,
+        &offload,
+        threshold_bytes,
+        &materialize_root,
+        policy.as_deref(),
     )
     .await
 }

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use openhuman_core::agent::harness::host_definition::{AgentDefinition, AgentDefinitionRegistry};
+use openhuman_core::agent_registry::host_definition::{AgentDefinition, AgentDefinitionRegistry};
 use openhuman_core::core::all::DomainGroup;
 use openhuman_core::core::runtime::{ContextOverlay, DomainSet};
 use openhuman_core::tools::toolpacks::{GroupMode, ToolGroups};
@@ -169,7 +169,7 @@ pub(crate) fn instantiate(runtime: &Runtime, spec: AgentSpec) -> Result<AgentInn
             ));
         }
         if let Some(root) = binding.root_namespace() {
-            openhuman_core::memory::scope::validate_root(root)
+            tinymemory_tools::layout::identity::validate_root(root)
                 .map_err(|reason| AgentError::Invalid(format!("memory root {root:?}: {reason}")))?;
         }
         log::debug!("[embed][agent] id={id} binds its memory agent_id={agent_id}");
@@ -294,20 +294,12 @@ pub(crate) fn instantiate(runtime: &Runtime, spec: AgentSpec) -> Result<AgentInn
         overrides.named_tools = Some(std::sync::Arc::new(names.iter().cloned().collect()));
     }
     let overrides = std::sync::Arc::new(overrides);
-    for hook in parts.post_turn_hooks {
-        overrides.post_turn_hook(hook.name(), Some(hook.clone()));
+    for (index, hook) in parts.post_turn_hooks.into_iter().enumerate() {
+        overrides.post_turn_hook(&format!("agent.learning_sink.{index:020}"), Some(hook));
     }
     for hook in parts.tool_hooks {
         overrides.tool_hook(hook.name(), Some(hook.clone()));
     }
-    let approval_subscription = parts.approval_handler.map(|handler| {
-        super::approval_handler::ApprovalSubscription::new(
-            &id,
-            handler,
-            lifecycle.removed(),
-            lifecycle.approval_state(),
-        )
-    });
     let overlay = ContextOverlay {
         host_overrides: Some(overrides.clone()),
         config: context_config,
@@ -325,10 +317,25 @@ pub(crate) fn instantiate(runtime: &Runtime, spec: AgentSpec) -> Result<AgentInn
             )
             .with_privacy_mode(config.privacy.mode),
         )),
+        autonomy_tier_source: Some(openhuman_core::core::runtime::AutonomyTierSource::Captured),
+        autonomy_tier_ceiling: host_only
+            .then_some(openhuman_core::security::AutonomyLevel::ReadOnly),
         approvals_disabled: !access.approval_gate_enabled(),
         definitions,
     };
-    let ctx = runtime.core_runtime().context().derive_with(overlay);
+    let ctx = runtime
+        .core_runtime()
+        .context()
+        .derive_with_parent_config(base, overlay);
+    let approval_subscription = parts.approval_handler.map(|handler| {
+        super::approval_handler::ApprovalSubscription::new(
+            &id,
+            handler,
+            lifecycle.removed(),
+            lifecycle.approval_state(),
+            Some(std::sync::Arc::downgrade(&ctx)),
+        )
+    });
     openhuman_core::core::runtime::AgentContextRegistry::register(&id, &ctx);
 
     log::debug!(
@@ -361,6 +368,7 @@ pub(crate) fn instantiate(runtime: &Runtime, spec: AgentSpec) -> Result<AgentInn
         host_tools: parts.host_tools,
         hooks: parts.hooks,
         lifecycle,
+        mcp_cleanup: Default::default(),
         host_only,
     })
 }
@@ -492,6 +500,7 @@ fn map_harness_err(err: crate::HarnessError) -> AgentError {
         crate::HarnessError::Workspace { what, source } => AgentError::Workspace { what, source },
         crate::HarnessError::Invalid(msg) => AgentError::Invalid(msg),
         crate::HarnessError::Call(e) => AgentError::Call(e),
+        crate::HarnessError::McpCleanup(e) => AgentError::McpCleanup(e),
         crate::HarnessError::Build(e) => AgentError::Invalid(format!("{e:#}")),
         crate::HarnessError::AlreadyRunning => AgentError::Invalid(err.to_string()),
     }

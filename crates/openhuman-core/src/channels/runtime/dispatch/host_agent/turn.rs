@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use super::posture;
 use crate::agent::bus::AgentTurnResponse;
 use crate::agent::host_agents::HostAgent;
-use crate::agent::progress::AgentProgress;
-use crate::agent::turn_origin::AgentTurnOrigin;
+use crate::progress::AgentProgress;
+use crate::security::turn_origin::AgentTurnOrigin;
 use tinyagents_session::transcript::TranscriptMessage;
 
 /// One channel message, as a host agent's turn needs it.
@@ -28,6 +28,9 @@ pub(crate) struct HostChannelTurn {
     pub(crate) origin: AgentTurnOrigin,
     /// Live progress for the channel's draft updates.
     pub(crate) progress: Option<mpsc::Sender<AgentProgress>>,
+    /// Where this turn's parked approvals surface; default for a channel
+    /// without an approval surface.
+    pub(crate) approval: crate::security::approval::ApprovalTurnContext,
 }
 
 /// Run `turn` as `host`: its definition and host tools, inside its context,
@@ -44,6 +47,7 @@ pub(crate) async fn run_host_agent_turn(
         message,
         origin,
         progress,
+        approval,
     } = turn;
     let mut config = host.config.clone();
     let profile_ceiling = host
@@ -93,7 +97,7 @@ pub(crate) async fn run_host_agent_turn(
     session.set_on_progress(progress);
 
     let text = host
-        .scope(session.run_single_with_origin(&message, Some(origin)))
+        .scope(session.run_single_with_approval(&message, Some(origin), approval))
         .await?;
     Ok(AgentTurnResponse::with_resolved_route(
         text,

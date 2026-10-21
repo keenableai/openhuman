@@ -1,4 +1,4 @@
-use crate::memory::types::TurnCitation;
+use crate::web_chat::TurnCitation;
 
 pub async fn deliver_response_for_test(
     client_id: &str,
@@ -33,6 +33,7 @@ pub(crate) async fn deliver_response_with_timing_for_test(
     timing: Option<super::super::turn_timing::TurnTimingSnapshot>,
 ) {
     super::deliver_response(
+        &crate::core::runtime::DispatchCtx::ambient(),
         client_id,
         thread_id,
         request_id,
@@ -59,6 +60,7 @@ pub async fn deliver_response_in_workspace_for_test(
     workspace_dir: Option<&std::path::Path>,
 ) {
     super::deliver_response(
+        &crate::core::runtime::DispatchCtx::ambient(),
         client_id,
         thread_id,
         request_id,

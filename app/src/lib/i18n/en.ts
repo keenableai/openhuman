@@ -735,7 +735,6 @@ const en: TranslationMap = {
   'devOptions.toolPolicyDiagnostics.unavailable': 'Diagnostics unavailable',
 
   // Voice / Dictation
-  'voice.pushToTalk': 'Push to Talk',
 
   // Misc
   'misc.somethingWentWrong': 'Something went wrong',
@@ -1337,13 +1336,9 @@ const en: TranslationMap = {
   'team.deleting': 'Deleting...',
 
   // Voice
-  'voice.tapToToggle': 'Tap to toggle',
   'voice.settingsSaved': 'Voice settings saved.',
   'voice.failedToLoadSettings': 'Failed to load voice settings',
   'voice.failedToSaveSettings': 'Failed to save voice settings',
-  'voice.debug.alwaysOn': 'Always-on listening',
-  'voice.debug.alwaysOnDesc':
-    'Keep the microphone open and send what you say to the agent automatically, no hotkey. Pauses when the screen is locked.',
   'voice.providers.saved': 'Voice providers saved.',
   'voice.providers.failedToSave': 'Failed to save voice providers',
   'voice.mode.start': 'Start voice chat',
@@ -1351,7 +1346,7 @@ const en: TranslationMap = {
   'voice.mode.connecting': 'Connecting…',
   'voice.mode.listening': 'Listening',
   'voice.mode.speaking': 'Speaking',
-  'voice.pageDesc': 'Speech engines, how they are routed, and push-to-talk.',
+  'voice.pageDesc': 'Speech engines and provider routing.',
   'voice.providers.title': 'Voice Providers',
   'voice.providers.cardDesc': 'Turn on the engines you want to use. Keys stay on this device.',
   'voice.providers.cap.stt': 'Speech to text',
@@ -1427,27 +1422,6 @@ const en: TranslationMap = {
   // External voice providers
 
   // Push-to-talk (PTT)
-  'pttSettings.title': 'Push-to-talk',
-  'pttSettings.clearShortcut': 'Clear',
-  'pttSettings.description':
-    "Hold a key to talk to OpenHuman while you're in another app. Release the key to send; OpenHuman speaks the reply if 'Speak agent replies' is on.",
-  'pttSettings.shortcutLabel': 'Hotkey',
-  'pttSettings.shortcutPlaceholder': 'Press a key (e.g. F13)',
-  'pttSettings.shortcutUnsetHint': 'Push-to-talk is off: pick a hotkey to enable.',
-  'pttSettings.speakRepliesLabel': 'Speak agent replies',
-  'pttSettings.showOverlayLabel': 'Show overlay while held',
-  'pttSettings.errorConflictsWithDictation':
-    'This shortcut is already used by dictation. Pick a different key.',
-  'pttSettings.errorModifierOnly':
-    "Pick a regular key (e.g. F13): modifier-only shortcuts don't work for push-to-talk.",
-  'pttSettings.errorEmpty': 'Pick a key to bind.',
-  'pttSettings.errorAccessibility':
-    'macOS needs Accessibility permission for this shortcut. Open System Settings → Privacy & Security → Accessibility and enable OpenHuman.',
-  'pttSettings.errorShortcutInUse': 'Another app already uses this shortcut. Pick a different one.',
-  'pttSettings.errorUnsupportedWayland':
-    "Wayland sessions don't support global shortcuts in OpenHuman yet: switch to an X11 session or use the in-app dictation toggle.",
-  'pttOverlay.listening': 'Listening…',
-  'pttOverlay.idle': 'Idle',
 
   // Autocomplete
 
@@ -1500,7 +1474,8 @@ const en: TranslationMap = {
   'chat.stallWarning.thinking':
     'Still thinking. No new output for 2 minutes, but the agent is still working. Press Stop if you want to cancel.',
   'chat.stallWarning.working':
-    'Still working. A step has run for over 2 minutes with no new output. Press Stop if you want to cancel.',
+    'No new output for {duration}. The agent may be stuck; press Stop to cancel.',
+  'chat.stallWarning.toolRunning': '{tool}. Long steps like builds or CI watches can take a while.',
   'chat.filter.tasks': 'Tasks',
   'chat.selectThread': 'Select a thread',
   'chat.noThreads': 'No threads yet',
@@ -2144,6 +2119,23 @@ const en: TranslationMap = {
   'conversations.tools.steps.other': '{count} steps',
   'conversations.tools.working': 'Working',
   'conversations.tools.noOutput': 'No output',
+  'conversations.mcpUi.openInBrowser': 'Open in browser',
+  'conversations.mcpUi.showQr': 'Show QR',
+  'conversations.mcpUi.hideQr': 'Hide QR',
+  'conversations.mcpUi.scanToOpen': 'Scan with your phone to open',
+  'conversations.mcpUi.openOnPhone': 'Open on your phone',
+  'conversations.mcpUi.copyLink': 'Copy link',
+  'conversations.mcpUi.copied': 'Copied',
+  'conversations.mcpUi.linksLabel': 'Links from this tool',
+  'conversations.mcpUi.widgetTitle': 'Tool view',
+  'conversations.mcpUi.widgetLoading': 'Loading view…',
+  'conversations.mcpUi.widgetUnavailable':
+    'This view is no longer available. Reconnect the server to see it again.',
+  'conversations.mcpUi.confirmTitle': 'Allow this action?',
+  'conversations.mcpUi.confirmBody':
+    'This view wants to run {tool}. It may change something in that service.',
+  'conversations.mcpUi.confirmAllow': 'Allow',
+  'conversations.mcpUi.confirmDeny': 'Deny',
   'conversations.tools.delegatedTo': 'Delegated to {agent}',
   'conversations.tools.parallelAgentsAggregating': 'Aggregating results',
   'conversations.tools.openInBrowser': 'Open in browser',
@@ -2764,10 +2756,6 @@ const en: TranslationMap = {
   'oauth.button.loopbackTimeout':
     'Sign-in timed out: the browser did not complete the OAuth redirect. Please try again.',
   'openhuman.team_list_teams': 'Team list teams',
-  'overlay.ariaAttention': 'Attention message',
-  'overlay.ariaOrb': 'OpenHuman overlay',
-  'overlay.ariaVoiceActive': 'Voice input active',
-  'overlay.orbTitle': 'Drag to move · Double-click to reset position',
   'pages.settings.account.migration': 'Import',
   'pages.settings.account.migrationDesc':
     'Bring memory and notes over from another local assistant',
@@ -3778,27 +3766,6 @@ const en: TranslationMap = {
   'skills.install.urlLabel': 'Skill URL',
   'skills.install.urlPlaceholder': 'https://raw.githubusercontent.com/owner/repo/main/SKILL.md',
   'skills.search.placeholder': 'Search skills…',
-  'skills.setup.voice.activation': 'Activation',
-  'skills.setup.voice.activeDescPrefix': 'Fn',
-  'skills.setup.voice.activeDescSuffix': 'Fn',
-  'skills.setup.voice.activeTitle': 'Voice Intelligence is Active',
-  'skills.setup.voice.customizeSettings': 'Customize settings',
-  'skills.setup.voice.downloadSttBtn': 'Open voice settings',
-  'skills.setup.voice.enableDesc': 'Dictate text hands-free using your microphone.',
-  'skills.setup.voice.hotkey': 'Hotkey',
-  'skills.setup.voice.startBtn': 'Starting...',
-  'skills.setup.voice.startError': 'Failed to start voice server',
-  'skills.setup.voice.starting': 'Starting...',
-  'skills.setup.voice.stepEnable': 'Start voice server',
-  'skills.setup.voice.stepSetup': 'Speech-to-text setup required',
-  'skills.setup.voice.stepSuccess': 'Ready to go',
-  'skills.setup.voice.sttNotReady': 'Speech-to-text model not ready',
-  'skills.setup.voice.sttNotReadyDesc':
-    'Voice Intelligence needs a working speech-to-text engine. Pick one under Settings › Voice.',
-  'skills.setup.voice.sttReady': 'Speech-to-text model ready',
-  'skills.setup.voice.sttReturnHint':
-    'Configure a speech-to-text engine in Voice settings, then come back here to start voice.',
-  'skills.setup.voice.title': 'Voice Intelligence',
   'skills.uninstall.description':
     'This permanently deletes the skill directory and all its bundled resources. The agent will stop seeing it at the next turn.',
   'upsell.global.limitMessage': 'Upgrade your plan or top up credits to continue',
@@ -3933,11 +3900,42 @@ const en: TranslationMap = {
   // Chat: agent-generated artifacts (#2779)
   'chat.artifact.ready': 'Ready',
   'chat.artifact.failed': 'Generation failed',
+  'chat.artifact.savedNotShown': 'Saved, but not updated in your Files folder',
   'chat.artifact.download': 'Download',
   'chat.artifact.downloading': 'Downloading…',
   'chat.artifact.download_failed': 'Download failed: {reason}',
   'chat.artifact.retry': 'Retry',
   'chat.artifact.reveal': 'Show in folder',
+  'chat.artifact.preview': 'Preview',
+  'chat.artifact.notFound': 'This artifact is no longer available.',
+  'chat.artifact.panel.close': 'Close panel',
+  'chat.artifact.panel.resize': 'Resize panel',
+  'chat.artifact.tabs.aria': 'Open artifacts',
+  'chat.artifact.tab.close': 'Close {title}',
+  'chat.artifact.view.aria': 'View',
+  'chat.artifact.view.preview': 'Preview',
+  'chat.artifact.view.code': 'Code',
+  'chat.artifact.copy': 'Copy to clipboard',
+  'chat.artifact.copied': 'Copied',
+  'chat.artifact.autosave.saved': 'Saved',
+  'chat.artifact.autosave.pending': 'Unsaved changes',
+  'chat.artifact.autosave.saving': 'Saving…',
+  'chat.artifact.autosave.error': 'Not saved',
+  'chat.artifact.kind.text': 'Text',
+  'chat.artifact.kind.markdown': 'Markdown',
+  'chat.artifact.kind.html': 'HTML',
+  'chat.artifact.kind.image': 'Image',
+  'chat.artifact.kind.file': 'File',
+  'chat.artifact.noPreview': 'No preview for this file. Download it to open it.',
+  'chat.artifact.htmlPreview': 'HTML preview',
+  'chat.artifact.editor': 'Artifact source',
+  'chat.artifact.share': 'Share: upload and copy a link',
+  'chat.artifact.share.failed': 'Not shared: {reason}',
+  'chat.artifact.share.copied': 'Link copied',
+  'chat.artifact.share.ready': 'Link ready',
+  'chat.artifact.share.expires': 'expires {date}',
+  'chat.artifact.share.copyLink': 'Copy the full link',
+  'chat.artifact.share.copy': 'Copy',
 
   // Chat: files panel (#3024)
   'chat.files.chip.aria.one': '{count} file in this chat',
@@ -4047,8 +4045,6 @@ const en: TranslationMap = {
     'An OPENHUMAN_APPROVAL_GATE=0 override was detected but ignored: the desktop app always keeps the approval gate on.',
 
   // Run queue
-  'notch.ready': 'Ready',
-  'notch.listening': 'Listening…',
 
   // Code block chrome
   'codeBlock.copy': 'Copy',
@@ -5114,6 +5110,8 @@ const en: TranslationMap = {
   'conversations.tools.createDocument.done': 'Created document',
   'conversations.tools.createPresentation.active': 'Creating presentation',
   'conversations.tools.createPresentation.done': 'Created presentation',
+  'conversations.tools.showView.done': 'Showed a view',
+  'conversations.tools.showView.active': 'Showing a view',
   'conversations.tools.recallMemories.active': 'Recalling memories',
   'conversations.tools.recallMemories.done': 'Recalled memories',
   'conversations.tools.saveToMemory.active': 'Saving to memory',
@@ -5326,6 +5324,12 @@ const en: TranslationMap = {
   'conversations.tools.checkArtifacts.done': 'Checked artifacts',
   'conversations.tools.deleteArtifact.active': 'Deleting artifact',
   'conversations.tools.deleteArtifact.done': 'Deleted artifact',
+  'conversations.tools.createArtifact.active': 'Creating artifact',
+  'conversations.tools.createArtifact.done': 'Created artifact',
+  'conversations.tools.updateArtifact.active': 'Updating artifact',
+  'conversations.tools.updateArtifact.done': 'Updated artifact',
+  'conversations.tools.shareArtifact.active': 'Sharing artifact',
+  'conversations.tools.shareArtifact.done': 'Shared artifact',
   'flows.suggest.trigger.schedule': 'Scheduled',
   'flows.suggest.trigger.app_event': 'On event',
   'flows.suggest.trigger.manual': 'On demand',

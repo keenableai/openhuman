@@ -1,10 +1,11 @@
 use super::*;
 use crate::storage::rusqlite;
 use crate::storage::MemoryStorage;
+use crate::util::classic_transcript_fixture::write_classic;
 use sha2::Digest as _;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
-use tinyagents_session::transcript::{write_transcript, TranscriptMessage, TranscriptMeta};
+use tinyagents_session::transcript::{TranscriptMessage, TranscriptMeta};
 use tinyagents_session::turn_state::TurnState;
 
 fn workspace() -> (TempDir, Config) {
@@ -71,13 +72,11 @@ fn legacy_workspace(config: &Config) {
     let raw = config.workspace_dir.join("session_raw");
     std::fs::create_dir_all(&raw).unwrap();
     let message = TranscriptMessage::new("user", "hello from the old layout");
-    write_transcript(
+    write_classic(
         &raw.join(format!("{stem}.jsonl")),
         &[message],
         &meta("thread-1", "orchestrator"),
-        None,
-    )
-    .unwrap();
+    );
 
     // The classic file layout: turn_states/<hex(thread)>/<hex(request)>.json.
     let snapshot = TurnState::started("thread-1", "req-1", 4, "2026-01-01T00:00:00Z");
@@ -125,7 +124,7 @@ fn a_classic_workspace_moves_into_the_backend_and_its_files_are_untouched() {
     let outcome = reports.into_iter().next().unwrap().outcome.unwrap();
     assert!(matches!(outcome, Outcome::Imported { .. }), "{outcome:?}");
 
-    let provider = DriverSessionStores::new(Arc::clone(&backend)).unwrap();
+    let provider = DriverSessionStores::new(Arc::clone(&backend), Scope::local()).unwrap();
     // The transcript landed in the orchestrator's scope, where its session
     // resumes it.
     let orchestrator = provider.try_for_agent("orchestrator").unwrap();
@@ -175,18 +174,16 @@ fn a_transcript_naming_an_unknown_agent_lands_in_the_default_agent() {
     let stem = session_stem(&SessionRef::scoped("thread-9", "no-such-agent"));
     let raw = config.workspace_dir.join("session_raw");
     std::fs::create_dir_all(&raw).unwrap();
-    write_transcript(
+    write_classic(
         &raw.join(format!("{stem}.jsonl")),
         &[TranscriptMessage::new("user", "who am I")],
         &meta("thread-9", "no-such-agent"),
-        None,
-    )
-    .unwrap();
+    );
     let backend = backend();
 
     run_with(&backend, &config).remove(0).outcome.unwrap();
 
-    let provider = DriverSessionStores::new(Arc::clone(&backend)).unwrap();
+    let provider = DriverSessionStores::new(Arc::clone(&backend), Scope::local()).unwrap();
     let default = provider.try_for_agent(DEFAULT_AGENT).unwrap();
     assert!(default.transcripts.root_for_thread("thread-9").is_some());
 }
@@ -202,4 +199,29 @@ fn a_stem_names_the_agent_it_was_written_by() {
         Some("orchestrator")
     );
     assert_eq!(agent_of("plain", &known), None);
+}
+
+#[test]
+fn database_import_totals_source_families_not_derived_fts_rows() {
+    let counts = |read, imported| ImportCounts {
+        read,
+        imported,
+        already_present: read - imported,
+    };
+    let report = LegacyDatabaseReport {
+        sessions: counts(1, 1),
+        messages: counts(2, 1),
+        tool_calls: counts(3, 2),
+        agent_runs: counts(4, 3),
+        telemetry: counts(5, 4),
+        events: counts(6, 5),
+        workflow_runs: counts(7, 6),
+        teams: counts(8, 7),
+        members: counts(9, 8),
+        tasks: counts(10, 9),
+        tool_effects: counts(11, 10),
+        fts_rows: 1_000,
+    };
+
+    assert_eq!(database_totals(&report), (66, 56));
 }

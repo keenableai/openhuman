@@ -368,6 +368,18 @@ fn snapshot_config_json_redacts_the_storage_url_credentials() {
     );
 }
 
+#[test]
+fn snapshot_config_json_redacts_the_inbound_queue_url_credentials() {
+    let mut cfg = Config::default();
+    cfg.inbound.queue_url = Some("amqp://app:hunter2@broker.internal/vhost".into());
+    let snapshot = snapshot_config_json(&cfg).unwrap();
+    assert!(!snapshot.to_string().contains("hunter2"));
+    assert_eq!(
+        snapshot["config"]["inbound"]["queue_url"],
+        "amqp://***@broker.internal/vhost"
+    );
+}
+
 // ── agent_server_status ────────────────────────────────────────
 
 #[test]
@@ -447,7 +459,13 @@ async fn apply_search_settings_sets_and_clears_allowed_domains() {
         ]),
         ..Default::default()
     };
-    apply_search_settings(&mut cfg, patch).await.expect("apply");
+    apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
+        &mut cfg,
+        patch,
+    )
+    .await
+    .expect("apply");
     assert_eq!(
         cfg.http_request.allowed_domains,
         vec!["github.com".to_string(), "reuters.com".to_string()]
@@ -458,7 +476,13 @@ async fn apply_search_settings_sets_and_clears_allowed_domains() {
         allow_all: Some(true),
         ..Default::default()
     };
-    apply_search_settings(&mut cfg, patch).await.expect("apply");
+    apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
+        &mut cfg,
+        patch,
+    )
+    .await
+    .expect("apply");
     assert_eq!(cfg.http_request.allowed_domains, vec!["*".to_string()]);
 
     // allow_all = false drops the wildcard (explicit hosts only / blocked).
@@ -466,7 +490,13 @@ async fn apply_search_settings_sets_and_clears_allowed_domains() {
         allow_all: Some(false),
         ..Default::default()
     };
-    apply_search_settings(&mut cfg, patch).await.expect("apply");
+    apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
+        &mut cfg,
+        patch,
+    )
+    .await
+    .expect("apply");
     assert!(cfg.http_request.allowed_domains.is_empty());
 }
 
@@ -476,6 +506,7 @@ async fn apply_search_settings_accepts_disabled_engine() {
     let mut cfg = tmp_config(&tmp);
 
     let result = apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
         &mut cfg,
         SearchSettingsPatch {
             engine: Some("disabled".to_string()),
@@ -499,9 +530,13 @@ async fn apply_search_settings_stores_and_clears_tavily_key() {
         "roles": {"search": ["tavily", "exa"]}
     }))
     .unwrap();
-    let result = apply_search_settings(&mut cfg, enable)
-        .await
-        .expect("save Tavily settings");
+    let result = apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
+        &mut cfg,
+        enable,
+    )
+    .await
+    .expect("save Tavily settings");
     let tavily = result.value["providers"]
         .as_array()
         .unwrap()
@@ -519,9 +554,13 @@ async fn apply_search_settings_stores_and_clears_tavily_key() {
         "providers": {"tavily": {"api_key": "  "}}
     }))
     .unwrap();
-    let result = apply_search_settings(&mut cfg, clear)
-        .await
-        .expect("clear Tavily key");
+    let result = apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
+        &mut cfg,
+        clear,
+    )
+    .await
+    .expect("clear Tavily key");
     assert!(cfg.search.tavily.api_key.is_none());
     assert!(!result.value["effective_roles"]["search"]
         .as_array()
@@ -536,6 +575,7 @@ async fn apply_search_settings_rejects_unknown_search_engine() {
     let mut cfg = tmp_config(&tmp);
 
     let err = apply_search_settings(
+        &crate::core::runtime::DispatchCtx::unbound(),
         &mut cfg,
         SearchSettingsPatch {
             engine: Some("unknown".to_string()),

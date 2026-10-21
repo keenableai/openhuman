@@ -8,6 +8,7 @@ pub mod savings;
 pub mod schemas;
 pub mod tools;
 
+use crate::core::runtime::DispatchCtx;
 use tinyjuice_bus::names::methods;
 use tinyjuice_bus::types::{AgentTokenjuiceCompression, CompressorKind};
 
@@ -136,20 +137,25 @@ pub async fn install_from_config(config: &crate::config::Config) -> Result<(), S
         return Ok(());
     }
     savings::configure(
-        &client(config),
         config
             .default_model
             .clone()
             .unwrap_or_else(|| crate::config::DEFAULT_MODEL.to_string()),
+    );
+    // Totals the old build kept in a snapshot file move into the module's
+    // storage first (once per file, best effort).
+    crate::modules::import_legacy_tinyjuice_savings(
+        &crate::core::runtime::DispatchCtx::ambient(),
+        &client(config),
         &config.workspace_dir,
     )
-    .await
-    .unwrap_or_else(|e| log::debug!("[tokenjuice][savings] configure failed: {e}"));
+    .await;
     let request = install_request(config);
     // The module keeps the durable tier on its blob storage; originals the old
     // disk tier wrote move across first (once per directory, best effort).
     if let Some(root) = request.disk_tier_root.as_deref() {
         crate::modules::import_legacy_tinyjuice(
+            &crate::core::runtime::DispatchCtx::ambient(),
             std::path::Path::new(root),
             request.ccr_ttl_secs.map(std::time::Duration::from_secs),
         )
@@ -440,9 +446,10 @@ mod repl_module_tests;
 
 /// Run a typed query inside TinyJuice; cached originals stay inside the module.
 pub async fn query(
+    ctx: &DispatchCtx,
     request: tinyjuice_bus::wire::QueryRequest,
 ) -> Result<tinyjuice_bus::wire::QueryResponse, String> {
-    let config = crate::config::ops::load_config_with_timeout().await?;
+    let config = ctx.load_config().await?;
     query_for_config(&config, request).await
 }
 
@@ -458,8 +465,8 @@ pub(crate) async fn query_for_config(
 }
 
 /// Extract HTML through the compiled module independently of compression settings.
-pub async fn extract_html(html: String) -> Result<String, String> {
-    let config = crate::config::ops::load_config_with_timeout().await?;
+pub async fn extract_html(ctx: &DispatchCtx, html: String) -> Result<String, String> {
+    let config = ctx.load_config().await?;
     let response: tinyjuice_bus::wire::HtmlResponse = client(&config)
         .call("tinyjuice", methods::EXTRACT_HTML, (html,))
         .await

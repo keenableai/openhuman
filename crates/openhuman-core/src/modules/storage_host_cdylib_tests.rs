@@ -12,17 +12,14 @@
 //! * a module cannot reach another module's collections, another scope, or a
 //!   collection its grant never declared;
 //! * a blob over the inline cap (1 MiB) is refused and stores nothing;
-//! * `PutStream`, `GetStream` and `WatchOpen` are refused as unsupported.
-//!
-//! What still waits for tinybus 0.1.5 (#7781): the positive halves of the last
-//! two. Peer-bound streams (`Connection::accept_stream_from`) and unicast watch
-//! signals (`Connection::emit_to`) do not exist in the vendored tinybus 0.1.3
-//! (`vendor/tinybus`), so the host cannot bind `PutStream`/`GetStream`/
-//! `WatchOpen` and answers them `unsupported-selector`. Once #7781 moves the
-//! pin, replace `streams_and_watches_are_refused_until_tinybus_binds_them` with
-//! the >16 MiB `PutStream`/`GetStream` round trip and a watch signal.
+//! * a blob over the 16 MiB bus frame round-trips by `PutStream`/`GetStream`
+//!   on a peer-bound `tinybus.Stream`, and a body no frame could carry is a
+//!   clear error instead of a hung call;
+//! * a watch invalidation reaches the module that opened the watch, and no
+//!   other module sees it;
+//! * a second module can neither read the first module's blobs nor take the
+//!   stream the first opened.
 
-use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -32,7 +29,6 @@ use tinybus::module::ModuleHost;
 use tinybus::transport::memory::MemoryBus;
 use tinybus::{Connection, Proxy};
 use tinystoragedrivers::secrets::{DerivedKeys, KeyProvider};
-use tinystoragedrivers::MemoryStorage;
 use zeroize::Zeroizing;
 
 use crate::modules::storage_grants::{declared, StorageGrant};
@@ -106,19 +102,24 @@ fn stage(directory: &Path) -> PathBuf {
     staged
 }
 
-/// Names the probe's peer after `module_id` and nobody else.
+/// Names each listed peer after the registry module it stands for, and nobody
+/// else: the probe, and any extra peers a test adds.
 struct ProbeDirectory {
     connection: Connection,
-    module_id: &'static str,
+    peers: Vec<(&'static str, &'static str)>,
 }
 
 #[async_trait]
 impl CallerDirectory for ProbeDirectory {
     async fn module_for(&self, sender: &BusName) -> Option<String> {
-        match self.connection.name_owner(PROBE).await {
-            Ok(Some(owner)) if &owner == sender => Some(self.module_id.to_string()),
-            _ => None,
+        for (name, module_id) in &self.peers {
+            if let Ok(Some(owner)) = self.connection.name_owner(*name).await {
+                if &owner == sender {
+                    return Some((*module_id).to_string());
+                }
+            }
         }
+        None
     }
 }
 
@@ -130,7 +131,7 @@ impl Environment for Env {
         Some(Arc::clone(&self.0))
     }
     fn module_scope(&self, module_id: &str) -> Result<Scope, StorageError> {
-        module_scope(None, &Scope::local(), module_id)
+        module_scope(None, module_id)
     }
     fn grant(&self, module_id: &str) -> Option<StorageGrant> {
         declared(module_id)
@@ -157,6 +158,10 @@ struct Rig {
     trail: Arc<Trail>,
     /// A peer that is not the probe: the host must not know it.
     stranger: Connection,
+    /// Extra peers standing for registry modules, with the host-side bus name
+    /// of the storage interface's owner they talk to.
+    peers: Vec<Connection>,
+    host: BusName,
     probe: Proxy,
     _modules: ModuleHost,
     _staged: tempfile::TempDir,
@@ -164,6 +169,17 @@ struct Rig {
 
 /// The real probe, loaded, standing for registry module `module_id`.
 async fn rig(module_id: &'static str) -> Rig {
+    rig_with_peers(module_id, &[]).await
+}
+
+/// The bus name of the `n`th extra peer.
+fn peer_name(n: usize) -> String {
+    format!("ai.tinyhumans.test.Peer{n}")
+}
+
+/// [`rig`], plus one extra in-process peer per entry of `others`, each
+/// standing for that registry module under the bus name [`peer_name`].
+async fn rig_with_peers(module_id: &'static str, others: &[&'static str]) -> Rig {
     let transport = MemoryBus::new();
     let broker = Broker::new();
     broker.spawn(transport.clone());
@@ -174,18 +190,35 @@ async fn rig(module_id: &'static str) -> Rig {
     let stranger = Connection::connect(transport.connect().await.unwrap())
         .await
         .unwrap();
-    let backend: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let backend: Arc<dyn StorageBackend> =
+        Arc::new(crate::modules::storage_host_watching::WatchingStorage::new());
     let trail = Arc::new(Trail::default());
+    let mut peers = Vec::new();
+    let mut named = vec![(PROBE, module_id)];
+    for (n, other) in others.iter().enumerate() {
+        let connection = Connection::connect(transport.connect().await.unwrap())
+            .await
+            .unwrap();
+        let name: &'static str = Box::leak(peer_name(n).into_boxed_str());
+        connection.request_name(name).await.unwrap();
+        named.push((name, *other));
+        peers.push(connection);
+    }
     let host = Arc::new(StorageHost::new(
         Arc::new(ProbeDirectory {
             connection: host_connection.clone(),
-            module_id,
+            peers: named,
         }),
         Arc::new(Env(Arc::clone(&backend))),
         trail.clone(),
     ));
     attach(&modules, &host_connection, host).await.unwrap();
-    let staged = tempfile::tempdir().unwrap();
+    // TinyBus rejects module roots beneath symlinked ancestors. macOS exposes
+    // `/tmp` through `/var`, so stage under its canonical path.
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary directory");
+    let staged = tempfile::tempdir_in(temp_root).unwrap();
     let artifact = stage(staged.path());
     modules.load_file(&artifact).expect("load the probe cdylib");
     // `load_file` can return before the module's setup claims its name.
@@ -199,10 +232,17 @@ async fn rig(module_id: &'static str) -> Rig {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let probe = stranger.proxy(PROBE, "/probe", PROBE).unwrap();
+    let host = stranger
+        .name_owner(STORAGE_INTERFACE)
+        .await
+        .unwrap()
+        .expect("the storage host owns its name");
     Rig {
         backend,
         trail,
         stranger,
+        peers,
+        host,
         probe,
         _modules: modules,
         _staged: staged,
@@ -219,7 +259,7 @@ impl Rig {
     }
 
     fn scope(&self, module_id: &str) -> Scope {
-        module_scope(None, &Scope::local(), module_id).unwrap()
+        module_scope(None, module_id).unwrap()
     }
 }
 
@@ -249,12 +289,12 @@ async fn a_loaded_module_reads_and_writes_its_own_granted_collection() {
         .call(
             "Documents",
             "Put",
-            put("mcp_servers", "files", &json!({"qualified_name": "files"})),
+            put("mcp.servers", "files", &json!({"qualified_name": "files"})),
         )
         .await;
     assert!(stored.get("ok").is_some(), "{stored}");
     let read = rig
-        .call("Documents", "Get", get("mcp_servers", "files"))
+        .call("Documents", "Get", get("mcp.servers", "files"))
         .await;
     assert!(read.get("ok").is_some(), "{read}");
     assert!(read.to_string().contains("qualified_name"), "{read}");
@@ -262,7 +302,7 @@ async fn a_loaded_module_reads_and_writes_its_own_granted_collection() {
     let own = rig.backend.for_scope(&rig.scope("tinymcp")).unwrap();
     assert!(own
         .documents()
-        .get("mcp_servers", "files")
+        .get("mcp.servers", "files")
         .await
         .unwrap()
         .is_some());
@@ -359,7 +399,7 @@ async fn a_loaded_module_cannot_name_or_reach_another_scope() {
         handle
             .documents()
             .put(
-                "mcp_servers",
+                "mcp.servers",
                 "victim",
                 json!({"marker": "OTHER-SCOPE-SECRET"}),
                 Default::default(),
@@ -369,13 +409,13 @@ async fn a_loaded_module_cannot_name_or_reach_another_scope() {
     }
     // Same id, own scope: not found, not the other scope's document.
     let read = rig
-        .call("Documents", "Get", get("mcp_servers", "victim"))
+        .call("Documents", "Get", get("mcp.servers", "victim"))
         .await;
     assert!(read["ok"].is_null(), "{read}");
     assert!(!read.to_string().contains("OTHER-SCOPE-SECRET"), "{read}");
     // A scope smuggled into the request is not a selector the wire knows.
     for field in ["scope", "agent", "module", "profile"] {
-        let mut request = get("mcp_servers", "victim");
+        let mut request = get("mcp.servers", "victim");
         request[field] = json!("local");
         let answer = rig.call("Documents", "Get", request).await;
         assert!(answer.get("err").is_some(), "{field}: {answer}");
@@ -386,7 +426,7 @@ async fn a_loaded_module_cannot_name_or_reach_another_scope() {
         .call(
             "Documents",
             "Put",
-            put("mcp_servers", "mine", &json!({"qualified_name": "mine"})),
+            put("mcp.servers", "mine", &json!({"qualified_name": "mine"})),
         )
         .await;
     assert!(wrote.get("ok").is_some(), "{wrote}");
@@ -394,7 +434,7 @@ async fn a_loaded_module_cannot_name_or_reach_another_scope() {
         let handle = rig.backend.for_scope(&scope).unwrap();
         assert!(handle
             .documents()
-            .get("mcp_servers", "mine")
+            .get("mcp.servers", "mine")
             .await
             .unwrap()
             .is_none());
@@ -438,7 +478,7 @@ async fn a_loaded_module_cannot_use_a_collection_it_never_declared() {
         .call(
             "Documents",
             "DropCollection",
-            json!({"collection": "mcp_servers"}),
+            json!({"collection": "mcp.servers"}),
         )
         .await;
     assert!(denied(&dropped, "schema-is-host-only"), "{dropped}");
@@ -491,7 +531,7 @@ async fn a_peer_that_is_not_a_registry_module_is_refused() {
             STORAGE_INTERFACE,
         )
         .unwrap();
-    let refused: tinybus::Result<Value> = proxy.call("Get", (get("mcp_servers", "files"),)).await;
+    let refused: tinybus::Result<Value> = proxy.call("Get", (get("mcp.servers", "files"),)).await;
     match refused {
         Err(tinybus::Error::MethodFailed { name, message }) => {
             assert_eq!(name, "ai.tinyhumans.tinystorage.Error.Denied");
@@ -507,7 +547,7 @@ async fn a_blob_over_the_inline_cap_is_refused_and_stores_nothing() {
     let rig = rig("tinyjuice").await;
     let small: Value = rig
         .probe
-        .call("PutBlob", ("tinyjuice_ccr/small", 1024usize))
+        .call("PutBlob", ("juice/ccr/small", 1024usize))
         .await
         .unwrap();
     assert!(
@@ -516,12 +556,11 @@ async fn a_blob_over_the_inline_cap_is_refused_and_stores_nothing() {
     );
     // Past the contract's inline cap (1 MiB) the server refuses the body and
     // stores nothing; a body that size or bigger goes by `PutStream`, which
-    // waits for the tinybus move (#7781). (The 16 MiB frame itself is the
-    // bus's to enforce and is not exercised here: an inline body big enough to
-    // hit it takes the probe longer to build than a unit test should wait.)
+    // the tests below cover. (A body past the 16 MiB frame is covered by
+    // `an_inline_blob_no_frame_can_carry_fails_fast_instead_of_hanging`.)
     let big: Value = rig
         .probe
-        .call("PutBlob", ("tinyjuice_ccr/over-cap", 2usize * 1024 * 1024))
+        .call("PutBlob", ("juice/ccr/over-cap", 2usize * 1024 * 1024))
         .await
         .unwrap();
     assert!(
@@ -531,14 +570,14 @@ async fn a_blob_over_the_inline_cap_is_refused_and_stores_nothing() {
     let handle = rig.backend.for_scope(&rig.scope("tinyjuice")).unwrap();
     assert!(handle
         .blobs()
-        .head("tinyjuice_ccr/over-cap")
+        .head("juice/ccr/over-cap")
         .await
         .unwrap()
         .is_none());
     // The refusal does not take the module's connection down with it.
     let after: Value = rig
         .probe
-        .call("PutBlob", ("tinyjuice_ccr/after", 2048usize))
+        .call("PutBlob", ("juice/ccr/after", 2048usize))
         .await
         .unwrap();
     assert!(
@@ -547,73 +586,9 @@ async fn a_blob_over_the_inline_cap_is_refused_and_stores_nothing() {
     );
     // A blob key outside the CCR prefix is not the module's.
     let outside = rig
-        .call("Blobs", "Get", json!({"key": "tinyjuice_other/x"}))
+        .call("Blobs", "Get", json!({"key": "juice/other/x"}))
         .await;
     assert!(denied(&outside, "target-not-granted"), "{outside}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn streams_and_watches_are_refused_until_tinybus_binds_them() {
-    let _turn = TURN.lock().await;
-    let rig = rig("tinyjuice").await;
-    let put_stream = rig
-        .call(
-            "Blobs",
-            "PutStream",
-            json!({"key": "tinyjuice_ccr/streamed", "len": 17 * 1024 * 1024}),
-        )
-        .await;
-    assert!(denied(&put_stream, "unsupported-selector"), "{put_stream}");
-    let get_stream = rig
-        .call(
-            "Blobs",
-            "GetStream",
-            json!({"key": "tinyjuice_ccr/streamed"}),
-        )
-        .await;
-    assert!(denied(&get_stream, "unsupported-selector"), "{get_stream}");
-    let mcp = crate::modules::storage_grants::declared("tinymcp").unwrap();
-    assert!(!mcp.collections.is_empty());
-    // Watches belong to a document grant; tinyjuice has none, so the object is
-    // refused first. The unsupported label is pinned for a documented grant by
-    // `storage_grants_tests` and below for tinymcp.
-    let watch = rig
-        .call(
-            "Documents",
-            "WatchOpen",
-            json!({"collection": "mcp_servers"}),
-        )
-        .await;
-    assert!(
-        denied(&watch, "object-not-granted") || denied(&watch, "unsupported-selector"),
-        "{watch}"
-    );
-    // Nothing was written by the refused stream.
-    let handle = rig.backend.for_scope(&rig.scope("tinyjuice")).unwrap();
-    assert!(handle
-        .blobs()
-        .head("tinyjuice_ccr/streamed")
-        .await
-        .unwrap()
-        .is_none());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_watch_is_unsupported_for_a_module_that_may_use_documents() {
-    let _turn = TURN.lock().await;
-    let rig = rig("tinymcp").await;
-    let watch = rig
-        .call(
-            "Documents",
-            "WatchOpen",
-            json!({"collection": "mcp_servers"}),
-        )
-        .await;
-    assert!(denied(&watch, "unsupported-selector"), "{watch}");
-    let close = rig
-        .call("Documents", "WatchClose", json!({"watch": "w1"}))
-        .await;
-    assert!(denied(&close, "unsupported-selector"), "{close}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -625,7 +600,7 @@ async fn every_call_is_audited_under_the_module_id_without_a_payload() {
             "Documents",
             "Put",
             put(
-                "mcp_servers",
+                "mcp.servers",
                 "audited",
                 &json!({"marker": "PAYLOAD-MARKER"}),
             ),
@@ -644,3 +619,6 @@ async fn every_call_is_audited_under_the_module_id_without_a_payload() {
         .any(|record| record.outcome == "target-not-granted"));
     assert!(!format!("{trail:?}").contains("PAYLOAD-MARKER"));
 }
+
+#[path = "storage_host_cdylib_stream_tests.rs"]
+mod streams;

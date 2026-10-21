@@ -209,14 +209,16 @@ pub(super) fn resolve_cloud_slug<'a>(
 pub(super) fn try_create_cloud_slug_chat_model(
     role: &str,
     config: &Config,
+    egress: &EgressLedger,
 ) -> OptionalChatModelResult {
-    try_create_cloud_slug_chat_model_with_native_tools(role, config, true)
+    try_create_cloud_slug_chat_model_with_native_tools(role, config, true, egress)
 }
 
 pub(super) fn try_create_cloud_slug_chat_model_with_native_tools(
     role: &str,
     config: &Config,
     native_tool_calling: bool,
+    egress: &EgressLedger,
 ) -> OptionalChatModelResult {
     // Resolve the role's provider string, expanding the empty / "cloud" sentinel
     // to the primary cloud target.
@@ -229,6 +231,7 @@ pub(super) fn try_create_cloud_slug_chat_model_with_native_tools(
         &resolved,
         config,
         native_tool_calling,
+        egress,
     )
 }
 
@@ -236,8 +239,11 @@ pub(super) fn try_create_cloud_slug_chat_model_from_string(
     role: &str,
     provider: &str,
     config: &Config,
+    egress: &EgressLedger,
 ) -> OptionalChatModelResult {
-    try_create_cloud_slug_chat_model_from_string_with_native_tools(role, provider, config, true)
+    try_create_cloud_slug_chat_model_from_string_with_native_tools(
+        role, provider, config, true, egress,
+    )
 }
 
 pub(super) fn try_create_cloud_slug_chat_model_from_string_with_native_tools(
@@ -245,6 +251,7 @@ pub(super) fn try_create_cloud_slug_chat_model_from_string_with_native_tools(
     provider: &str,
     config: &Config,
     native_tool_calling: bool,
+    egress: &EgressLedger,
 ) -> OptionalChatModelResult {
     let p = provider.trim().to_string();
 
@@ -331,15 +338,15 @@ pub(super) fn try_create_cloud_slug_chat_model_from_string_with_native_tools(
             }
             let model_override =
                 (!effective_model.trim().is_empty()).then_some(effective_model.as_str());
-            let (backend, pinned_model) =
-                match resolve_managed_backend_with_model_override(role, config, model_override) {
-                    Ok(result) => result,
-                    Err(error) => return Some(Err(error)),
-                };
-            return Some(Ok((
-                Arc::new(backend.with_native_tool_calling(native_tool_calling)),
-                pinned_model,
-            )));
+            return Some(managed_chat_model(
+                role,
+                config,
+                model_override,
+                None,
+                native_tool_calling,
+                None,
+                egress,
+            ));
         }
         AuthStyle::Bearer => {
             // The codex routing may re-target the endpoint (OAuth backend).
@@ -370,7 +377,8 @@ pub(super) fn try_create_cloud_slug_chat_model_from_string_with_native_tools(
     // — past the managed/bespoke returns and the access
     // gates, so this constructs. Disclose as external. Single cloud chokepoint
     // for every cloud ChatModel/turn entry.
-    crate::security::egress::emit_external_transfer(
+    crate::security::egress::emit_external_transfer_in(
+        egress,
         crate::security::egress::EgressDescriptor::inference(&slug, &effective_model, true),
     );
 

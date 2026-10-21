@@ -25,7 +25,7 @@ The behavior is specified in [`docs/specs/memory-v2.md`](https://github.com/tiny
 | --- | --- |
 | `engine` | Binds `[memory] engine`: `tinyhumans` over the host's backend credential (resolved per request) with the transport's attribution headers, or `cortexdb` with the key stored as `memory-cortexdb`. Off when neither is usable. |
 | `guard` | `ScrubbingEngine`: every write is scrubbed under the host policy, whichever path makes it. |
-| `scope` | `MemoryIdentity` scoped around every turn, resolved to a layout root and a memory agent id (host binding, definition pin, team, default). |
+| `scope` | Projects OpenHuman config into TinyMemory `IdentityPins`; callers use upstream `Identity` / `ResolvedIdentity` for each turn. |
 | `lifecycle::prefetch` | Scoped, bounded in-memory cache and background workers for automatic turn and compaction recall. |
 | `lifecycle::hooks` | Lifecycle primitives; explicit/manual `pre_turn` and `compaction` retain configured deadlines. |
 | `lifecycle::jobs` | The persisted background queue and the `memory_background` cron job. |
@@ -45,14 +45,14 @@ The behavior is specified in [`docs/specs/memory-v2.md`](https://github.com/tiny
 
 | Hook | File |
 | --- | --- |
-| Pre-turn (take cached pack, queue logging and refresh) | `agent/session_host/runtime_session/memory_ingest.rs`, from `before_turn` in `runtime_session.rs` |
+| Pre-turn (take cached pack, queue logging and refresh) | `memory/lifecycle/session_hooks.rs`, from `before_turn` in `runtime_session.rs` |
 | Pack injection, ephemeral, every model request of the turn | `agent/tinyagents/middleware/memory_pack.rs` |
-| Post-turn (log the reply, queue builds), after the durable commit | `memory_ingest.rs`, from `finalize_after_durable_commit` |
+| Post-turn (log the reply, queue builds), after the durable commit | `session_hooks.rs`, from `finalize_after_durable_commit` |
 | Compaction enrichment from completed cache, with background refresh | `agent/tinyagents/memory_summarizer.rs`, wrapped around the summarizer in `context_wiring.rs` (ladder order and sizing live in `tinyagents-harness` `ContextLadder`) |
 
 Automatic packs are keyed by CoreContext, workspace, config fingerprint, resolved memory identity and thread. They expire after 60 seconds. The cache holds at most 64 entries per context and 64 KiB per pack; eight workers globally process bounded queues of at most 16 pending operations per entry, with a 120-second deadline per operation. Saturation skips best-effort automatic work rather than waiting. Packs identify themselves as results of an earlier lookup, not authoritative answers to the current question.
 
-Successful content changes clear cached packs and advance a revision, preserving queued conversation logs while rejecting older in-flight results. Engine or credential invalidation clears the caches and pending refreshes. Scoped background tasks retain both CoreContext and memory identity.
+Successful content changes clear cached packs and advance a revision, preserving queued conversation logs while rejecting older in-flight results. Engine or credential invalidation clears the caches and pending refreshes. Scoped background tasks retain the CoreContext; the memory identity is an explicit value on the run context, not task-local state.
 
 The agent tool allows 15 seconds per call, 30 seconds of aggregate reserved time and eight attempts per retained run record. The tracker keeps 128 records; idle eviction under churn can reset the budget for that run, while outstanding reservations cannot be evicted. `learn`/`forget` acknowledge durable local admission, not remote completion. Their scrubbed outbox entries contain trusted scope rather than credentials, and retry under the matching owner on background/auth ticks. Direct RPC, UI and import/deletion workflows keep their explicit behavior.
 

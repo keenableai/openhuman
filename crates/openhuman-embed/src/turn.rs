@@ -18,32 +18,34 @@
 //! the value. [`TurnRequest`] pins the spelling in one place, next to a test
 //! that decodes it as the controller does.
 //!
-//! # The two ambient scopes, and why they are not optional
+//! # The ambient origin scope, and why it is not optional
 //!
-//! A turn reads two `tokio` task-locals that no parameter can carry:
+//! A turn reads one `tokio` task-local that no parameter can carry yet:
 //!
-//! - **origin** ([`turn_origin`](openhuman_core::agent::turn_origin)) — the
+//! - **origin** ([`turn_origin`](openhuman_core::security::turn_origin)) — the
 //!   caller's statement of authority. The approval gate is *fail-closed*: an
 //!   unlabelled call gets the `Cli` default, and a caller wanting anything
 //!   else — a workflow's blanket automation grant, say — must scope it around
 //!   the dispatch. Miss it and the turn still succeeds while every acting tool
 //!   quietly refuses, which reads as a bad model rather than a missing scope.
-//! - **progress** ([`progress_sink`](openhuman_core::agent::progress_sink)) —
-//!   the call resolves to one final string, so an embedder that wants tool
-//!   calls and deltas has to have installed the sink *before* awaiting.
 //!
-//! Both are established by [`Turn::send`], so a host never has to know they
-//! exist. That is the whole reason this facade is worth having over `invoke`.
+//! Everything else a turn needs rides explicit values handed to the core
+//! (`AgentChatEnv`): the **progress** sink
+//! ([`AgentProgress`](openhuman_core::progress::AgentProgress)) and the host
+//! environment (shared budget, delegation depth, cancellation, hooks, tool-belt
+//! authority).
+//!
+//! The origin is established by [`Turn::send`], so a host never has to know it
+//! exists. That is the whole reason this facade is worth having over `invoke`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::call::call;
 use super::error::CoreError;
-use openhuman_core::agent::progress::AgentProgress;
-use openhuman_core::agent::turn_origin::AgentTurnOrigin;
 use openhuman_core::core::runtime::CoreRuntime;
 use openhuman_core::inference::INFERENCE_AGENT_CHAT as AGENT_CHAT;
+use openhuman_core::progress::AgentProgress;
+use openhuman_core::security::turn_origin::AgentTurnOrigin;
 
 #[path = "turn_types.rs"]
 mod types;
@@ -68,10 +70,16 @@ pub(crate) enum TurnTarget {
 /// on, so a host can build it in one place and send it from another.
 pub struct Turn {
     budget: Option<crate::budget::ModelBudget>,
+    /// A narrower model-directed delegation depth for this turn (fanout leaves).
+    spawn_depth_limit: Option<usize>,
+    /// The native token this turn's run tree observes, minted by `send` and
+    /// handed to the core on the turn's host environment.
+    native_cancellation: Option<crate::CancellationToken>,
     target: TurnTarget,
     request: TurnRequest,
     session_id: Option<String>,
     origin: Option<AgentTurnOrigin>,
+    flow_run: Option<(String, String)>,
     progress: Option<tokio::sync::mpsc::Sender<AgentProgress>>,
     seed: Option<Vec<(String, String)>>,
     attachments: Vec<openhuman_core::agent::HostAttachment>,
@@ -85,13 +93,17 @@ pub struct Turn {
     require_tool_call: bool,
     untrusted_input: bool,
     cancellation: Option<crate::TurnCancellation>,
+    steering: Option<crate::TurnSteering>,
     timeout: Option<std::time::Duration>,
     control_deadline: Option<tokio::time::Instant>,
     observer: Option<Arc<dyn crate::observe::TurnObserver>>,
     trace_content: crate::observe::TraceContent,
-    hooks: openhuman_core::agent::hooks::HookScope,
+    hooks: tinyagents_hooks::scope::HookScope<
+        openhuman_core::agent::tinyagents::host::OpenHumanRunContext,
+        tinyagents_harness::cost::TurnCost,
+    >,
     tools: Option<openhuman_core::agent::HostTools>,
-    tool_env: Option<tinytools_std::timeout::CommandEnvironment>,
+    tool_env: Option<Arc<std::collections::BTreeMap<String, String>>>,
 }
 
 impl Turn {
@@ -99,9 +111,12 @@ impl Turn {
         Self {
             target,
             budget: None,
+            spawn_depth_limit: None,
+            native_cancellation: None,
             request: TurnRequest::new(message),
             session_id: None,
             origin: None,
+            flow_run: None,
             progress: None,
             seed: None,
             attachments: Vec::new(),
@@ -115,6 +130,7 @@ impl Turn {
             require_tool_call: false,
             untrusted_input: false,
             cancellation: None,
+            steering: None,
             timeout: None,
             control_deadline: None,
             observer: None,
@@ -130,14 +146,23 @@ impl Turn {
         self
     }
 
-    pub(crate) fn with_hooks(mut self, hooks: openhuman_core::agent::hooks::HookScope) -> Self {
+    pub(crate) fn with_hooks(
+        mut self,
+        hooks: tinyagents_hooks::scope::HookScope<
+            openhuman_core::agent::tinyagents::host::OpenHumanRunContext,
+            tinyagents_harness::cost::TurnCost,
+        >,
+    ) -> Self {
         self.hooks = hooks;
         self
     }
 
     /// Add a tool callback for this turn only, after runtime and agent hooks.
     /// Does not change the agent or any other concurrent turn.
-    pub fn tool_hook(mut self, hook: Arc<dyn crate::seams::ToolHook>) -> Self {
+    pub fn tool_hook(
+        mut self,
+        hook: Arc<dyn crate::seams::ToolHook<crate::seams::OpenHumanRunContext>>,
+    ) -> Self {
         self.hooks.push_tool(hook);
         self
     }
@@ -163,7 +188,7 @@ impl Turn {
     /// Interpreter pools are bypassed so a pooled process cannot carry another
     /// turn's environment. Independently spawned host tasks must carry the scope.
     pub fn tool_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
-        self.tool_env = Some(tinytools_std::timeout::CommandEnvironment::new(env));
+        self.tool_env = Some(Arc::new(env.into_iter().collect()));
         self
     }
 
@@ -197,8 +222,8 @@ impl Turn {
 
     /// Add a completed-turn callback for this turn only. The callback runs
     /// asynchronously with an owned snapshot after the turn completes.
-    pub fn post_turn_hook(mut self, hook: Arc<dyn crate::seams::PostTurnHook>) -> Self {
-        self.hooks.push_post_turn(hook);
+    pub fn post_turn_hook(mut self, hook: Arc<dyn crate::seams::LearningSink>) -> Self {
+        self.hooks.push_learning(hook);
         self
     }
 
@@ -402,6 +427,12 @@ impl Turn {
         self
     }
 
+    /// Narrow the model-directed delegation depth for this turn tree.
+    pub(crate) fn with_spawn_depth_limit(mut self, limit: usize) -> Self {
+        self.spawn_depth_limit = Some(limit);
+        self
+    }
+
     /// Set the sampling temperature for this turn.
     pub fn temperature(mut self, temperature: f64) -> Self {
         self.request.temperature = Some(temperature);
@@ -430,6 +461,17 @@ impl Turn {
     /// gate applies the narrower grant the caller actually meant.
     pub fn origin(mut self, origin: AgentTurnOrigin) -> Self {
         self.origin = Some(origin);
+        self
+    }
+
+    /// Binds the turn to one run of a saved flow, so an approval a tool call
+    /// parks on this turn is correlated back to that exact flow and run. Pair
+    /// it with a [`TrustedAutomationSource::Workflow`] [`origin`](Self::origin):
+    /// the origin only names the flow, not the run.
+    ///
+    /// [`TrustedAutomationSource::Workflow`]: crate::TrustedAutomationSource::Workflow
+    pub fn flow_run(mut self, flow_id: impl Into<String>, run_id: impl Into<String>) -> Self {
+        self.flow_run = Some((flow_id.into(), run_id.into()));
         self
     }
 
@@ -501,6 +543,9 @@ struct AgentTurnOptions {
         Option<std::sync::Arc<tinyagents_harness::observability::turn_observer::ObserverScope>>,
     untrusted_input: bool,
     attachments: Vec<openhuman_core::agent::HostAttachment>,
+    /// The explicit per-turn values the core honours: live progress and the
+    /// host environment (budget, depth, cancellation, hooks, tool-belt authority).
+    chat_env: openhuman_core::inference::host_runtime::ops::AgentChatEnv,
 }
 
 async fn dispatch(
@@ -547,9 +592,51 @@ async fn dispatch(
                     expected_user_state: true,
                 });
             }
-            call::<_, String>(&rt, AGENT_CHAT, &request)
-                .await
-                .map(|reply| (reply, None))
+            // Native, like the `Agent` arm: the progress sink and host
+            // environment are non-serializable values that ride the call as
+            // explicit arguments, which the JSON-RPC envelope could not carry.
+            // Gated and scoped exactly as the RPC dispatch would be.
+            if !rt.context().domains().inference {
+                return Err(CoreError::Unavailable { method: AGENT_CHAT });
+            }
+            let ctx = std::sync::Arc::clone(rt.context());
+            let chat_env = options.chat_env;
+            let dispatch =
+                openhuman_core::core::runtime::DispatchCtx::new(std::sync::Arc::clone(&ctx));
+            let turn: futures_box::BoxFuture<'_, Result<AgentReply, CoreError>> =
+                Box::pin(async move {
+                    use openhuman_core::inference::host_runtime::ops::{
+                        agent_chat_reply_for, AgentChatTarget,
+                    };
+                    let mut config = dispatch
+                        .load_config()
+                        .await
+                        .map_err(|raw| CoreError::from_rpc_string(AGENT_CHAT, raw))?;
+                    let target = match request.agent_id.as_deref().map(str::trim) {
+                        Some(id) if !id.is_empty() => AgentChatTarget::AgentId(id),
+                        _ => AgentChatTarget::Orchestrator,
+                    };
+                    let route = openhuman_core::config::schema::EphemeralRoute::from_params(
+                        request.inference_url.clone(),
+                        request.api_key.clone(),
+                    )
+                    .map(|route| route.with_headers(request.inference_headers.clone()));
+                    agent_chat_reply_for(
+                        &mut config,
+                        target,
+                        &request.message,
+                        request.model_override.clone(),
+                        request.temperature,
+                        request.thread_id.clone(),
+                        request.cwd.clone(),
+                        route,
+                        chat_env,
+                    )
+                    .await
+                    .map(|reply| (reply.text, None))
+                    .map_err(|raw| CoreError::from_rpc_string(AGENT_CHAT, raw))
+                });
+            rt.run_in(ctx, turn).await
         }
         TurnTarget::Agent(agent) => {
             if !agent.ctx.domains().inference {
@@ -594,6 +681,7 @@ async fn dispatch(
                         request.thread_id,
                         request.cwd,
                         route,
+                        options.chat_env,
                     )
                     .await;
                     // The shape preserves provider charges and root-call totals

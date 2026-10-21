@@ -2,19 +2,21 @@
 //! `tinyagents` harness event stream onto openhuman's [`AgentProgress`] +
 //! cost tracker (issue #4249). See the parent module doc for the overview.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::Sender;
 
 use tinyinference_llm::usage::Usage;
 
-use crate::agent::progress::AgentProgress;
 use crate::inference::provider::BilledUsage;
+use crate::progress::AgentProgress;
 use tinytools::humanize_tool_name;
 
 use super::bridge_types::{ProviderUsageCarry, SubagentScope, ToolFailureMap, ToolNameMap};
-use tinyagents_harness::events::{CallDedupe, IterationCursor, OrderedSender};
+use tinyagents_harness::events::{
+    AgentEvent, CallDedupe, EventRecord, IterationCursor, OrderedSender,
+};
 
 #[derive(Default)]
 pub(super) struct BridgeState {
@@ -55,8 +57,17 @@ pub(crate) struct OpenhumanEventBridge {
     /// model as `{provider_id}.{model}`.
     pub(super) provider_id: String,
     pub(super) max_iterations: u32,
+    /// Supplemental host repairs are durable trace generations but are not
+    /// extra agent-loop iterations or live wallet events. They share this
+    /// run-local ordered event sink, so `ModelStarted` brackets the following
+    /// `UsageRecorded` and terminal model event synchronously.
+    pub(super) supplemental_call_active: AtomicBool,
     /// `None` for a parent turn; `Some` to emit child-scoped `Subagent*` events.
     pub(super) scope: Option<SubagentScope>,
+    /// The agent definition the run acts as (its memory identity's agent),
+    /// attributed on usage records of a top-level turn. Set once by the turn
+    /// that owns the run ([`Self::set_definition`]).
+    pub(super) definition: std::sync::OnceLock<String>,
     /// Shared with the model adapter so thinking deltas line up with the
     /// model call (iteration) they belong to.
     pub(super) cursor: IterationCursor,
@@ -112,6 +123,36 @@ pub(crate) struct OpenhumanEventBridge {
     /// start/completed ordering (which would leave a tool row stuck `running`
     /// when a `ToolCallCompleted` overtakes its `ToolCallStarted`) (#4466).
     pub(super) sender: OrderedSender<AgentProgress>,
+    /// The context the run acts under; usage records take their tenant from it.
+    pub(super) dispatch: crate::core::runtime::DispatchCtx,
+}
+
+impl OpenhumanEventBridge {
+    /// Supplemental host calls belong in the durable trace, but are not
+    /// agent-loop iterations or live wallet updates.
+    pub(super) fn project_supplemental(&self, record: &EventRecord) -> bool {
+        match &record.event {
+            AgentEvent::ModelStarted { call_id, .. }
+                if call_id.as_str().contains("-host-supplemental-") =>
+            {
+                self.supplemental_call_active.store(true, Ordering::SeqCst);
+                true
+            }
+            AgentEvent::UsageRecorded { .. }
+                if self.supplemental_call_active.load(Ordering::SeqCst) =>
+            {
+                true
+            }
+            AgentEvent::ModelCompleted { call_id, .. }
+            | AgentEvent::ModelFailed { call_id, .. }
+                if call_id.as_str().contains("-host-supplemental-") =>
+            {
+                self.supplemental_call_active.store(false, Ordering::SeqCst);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl OpenhumanEventBridge {
@@ -132,6 +173,7 @@ impl OpenhumanEventBridge {
             Arc::default(),
             Arc::default(),
             Vec::new(),
+            crate::core::runtime::DispatchCtx::unbound(),
         )
     }
 
@@ -153,13 +195,16 @@ impl OpenhumanEventBridge {
         failure_map: ToolFailureMap,
         usage_carry: ProviderUsageCarry,
         tool_sets: Vec<Arc<Vec<Box<dyn tinytools::Tool>>>>,
+        dispatch: crate::core::runtime::DispatchCtx,
     ) -> Arc<Self> {
         Arc::new(Self {
             sender: OrderedSender::new(on_progress),
             model: model.into(),
             provider_id: provider_id.into(),
             max_iterations: max_iterations as u32,
+            supplemental_call_active: AtomicBool::new(false),
             scope,
+            definition: std::sync::OnceLock::new(),
             cursor,
             tool_names,
             failure_map,
@@ -170,7 +215,16 @@ impl OpenhumanEventBridge {
             unknown_calls: Mutex::new(std::collections::HashMap::new()),
             tool_sets,
             state: Mutex::new(BridgeState::default()),
+            dispatch,
         })
+    }
+
+    /// Names the agent definition this run acts as, for usage attribution. The
+    /// first call wins.
+    pub(crate) fn set_definition(&self, definition: Option<&str>) {
+        if let Some(definition) = definition.filter(|definition| !definition.is_empty()) {
+            let _ = self.definition.set(definition.to_owned());
+        }
     }
 
     /// Resolve `tool_name` against the turn's registered tool sets and
@@ -403,7 +457,12 @@ impl OpenhumanEventBridge {
         crate::platform::cost::record_provider_usage_scoped(
             &self.model,
             &usage_info,
-            crate::platform::cost::UsageScope::ambient(Some(&self.provider_id), subagent),
+            crate::platform::cost::UsageScope::in_ctx(
+                &self.dispatch,
+                Some(&self.provider_id),
+                subagent,
+            )
+            .with_definition(self.definition.get().map(String::as_str)),
         );
 
         // The cost footer is a top-level surface; for a child run the global

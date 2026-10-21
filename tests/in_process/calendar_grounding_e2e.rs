@@ -114,7 +114,7 @@ async fn test_orchestrator_has_current_date_context() -> Result<()> {
     let model = calendar_model(captured_messages.clone());
     let workspace = tempfile::tempdir()?;
     let _ =
-        openhuman_core::agent::harness::host_definition::AgentDefinitionRegistry::init_global_builtins();
+        openhuman_core::agent_registry::host_definition::AgentDefinitionRegistry::init_global_builtins();
 
     let mut agent = OpenHumanSessionHost::builder()
         .chat_model(model)
@@ -164,7 +164,7 @@ async fn test_subagent_has_current_date_context() -> Result<()> {
     let model = calendar_model(captured_messages.clone());
 
     let _ =
-        openhuman_core::agent::harness::host_definition::AgentDefinitionRegistry::init_global_builtins();
+        openhuman_core::agent_registry::host_definition::AgentDefinitionRegistry::init_global_builtins();
 
     let parent = openhuman_core::agent::harness::ParentExecutionContext {
         agent_definition_id: "orchestrator".into(),
@@ -193,10 +193,11 @@ async fn test_subagent_has_current_date_context() -> Result<()> {
         session_parent_prefix: None,
         on_progress: None,
         run_queue: None,
+        host_env: Default::default(),
     };
 
     let mut def =
-        openhuman_core::agent::harness::host_definition::AgentDefinitionRegistry::global()
+        openhuman_core::agent_registry::host_definition::AgentDefinitionRegistry::global()
             .unwrap()
             .get("critic")
             .unwrap()
@@ -211,15 +212,15 @@ async fn test_subagent_has_current_date_context() -> Result<()> {
     // `subagent_runner::ops::tests::resolve_subagent_provider_*`.
     def.model = tinyagents_definition::ModelSpec::Inherit;
 
-    let _ = openhuman_core::agent::harness::with_parent_context(parent, async {
-        openhuman_core::agent::subagent_host::run_subagent(
-            &def,
-            "list my calendar events for today",
-            openhuman_core::agent::subagent_host::SubagentRunOptions::default(),
-        )
-        .await
-    })
-    .await?;
+    // The parent is an explicit value on the run options, not ambient state.
+    let mut options = openhuman_core::agent::subagent_host::SubagentRunOptions::default();
+    options.run_context.parent = Some(parent);
+    let _ = openhuman_core::agent::subagent_host::run_subagent(
+        &def,
+        "list my calendar events for today",
+        options,
+    )
+    .await;
 
     let messages = captured_messages.lock();
     // Use substring search on all user messages

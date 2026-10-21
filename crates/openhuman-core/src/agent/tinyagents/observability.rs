@@ -11,17 +11,16 @@
 mod bridge_types;
 mod event_bridge;
 mod event_projection;
+mod tool_progress_projection;
 
 #[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
-use tinyagents_harness::events::AgentEvent;
-#[cfg(test)]
 use tinyinference_llm::usage::Usage;
 
 #[cfg(test)]
-use crate::agent::progress::AgentProgress;
+use crate::progress::AgentProgress;
 
 pub(crate) use bridge_types::{ProviderUsageCarry, SubagentScope, ToolFailureMap, ToolNameMap};
 pub(crate) use event_bridge::OpenhumanEventBridge;

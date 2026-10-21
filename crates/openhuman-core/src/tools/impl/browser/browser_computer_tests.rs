@@ -53,7 +53,8 @@ fn every_direct_or_controller_action_that_can_submit_needs_confirmation() {
         delay_ms: None
     }));
     assert!(needs_host_confirmation(&Action::Press {
-        key: "Enter".into()
+        key: "Enter".into(),
+        target: None
     }));
     assert!(!needs_host_confirmation(&Action::Hover {
         target: Target::reference("e1")
@@ -84,6 +85,19 @@ fn approval_describes_selector_and_locator_targets() {
     });
     assert!(locator.contains("Role locator") && locator.contains("Email"));
     assert!(!locator.contains("private@example.com"));
+
+    let press_action = Action::Press {
+        key: "Enter".into(),
+        target: Some(Target::reference("e7")),
+    };
+    let (reference, press) = approval_target(&press_action);
+    assert_eq!(reference, Some("e7"));
+    assert_eq!(press, " @e7");
+    let (_, untargeted) = approval_target(&Action::Press {
+        key: "Enter".into(),
+        target: None,
+    });
+    assert!(untargeted.is_empty());
 }
 
 #[test]
@@ -287,7 +301,7 @@ async fn stale_tool_close_preserves_a_newer_thread_session() {
     thread_sessions().lock().await.remove(&key);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn changed_browser_policy_retires_cached_session_for_same_thread() {
     let mut old_config = crate::config::Config::default();
     old_config.http_request.allowed_domains = vec!["example.com".into(), "other.test".into()];

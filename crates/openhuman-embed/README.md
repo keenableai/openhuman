@@ -30,6 +30,24 @@ tools that spawn independent tasks or processes must provide their own cleanup;
 MCP server lifecycles remain owned by the agent. Keep polling `send()` while
 awaiting cancellation, for example in a spawned task.
 
+## Steering one turn
+
+Acquire `Turn::steering_handle()` before sending a turn to add messages to it
+while it runs. The handle is cloneable and `Send + Sync`; `steer(text)` queues
+a user message that the agent loop applies at its next safe checkpoint:
+before the first model call, after a tool batch has settled, or when the model
+has just written its final answer. In that last case the draft stays on the
+transcript, the steer follows it, and the model is called once more, so a
+message that arrives during a plain chat turn's only model call still shapes
+that turn's reply. Nothing interrupts a model call or a tool already running.
+The model sees each steer as `[User steering message]: <text>`.
+
+Nothing is dropped silently. Steers the turn ended without applying come back
+on `TurnOutcome::unapplied_steers`, or from `TurnSteering::take_unapplied()`
+when the turn failed or was cancelled. A steer sent after the turn ended is
+refused with `SteerRefused`, which carries its text (`into_text()`). The host
+decides whether to run what came back as the next turn.
+
 ## Scoped worker hooks
 
 Hooks can be supplied at three levels: `RuntimeBuilder::tool_hook` /
@@ -43,7 +61,7 @@ The agent and turn hooks are never installed in the global registry, so
 concurrent workers and later turns do not pick up one another's callbacks.
 Post-turn callbacks run asynchronously with an owned session snapshot.
 Independently spawned tasks that build sessions must explicitly inherit
-`openhuman_core::agent::hooks::HookScope` to carry scoped hooks.
+`tinyagents_hooks::scope::HookScope` to carry scoped hooks.
 
 Gateway attribution headers can be attached to `Route::header(name, value)`
 and used with `Turn::route`, or with `Provider::routed(route)` on an agent.

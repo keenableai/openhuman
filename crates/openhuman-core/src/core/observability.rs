@@ -13,8 +13,21 @@
 //! canonical example — `run_single` used to publish a `DomainEvent::AgentError`
 //! and return `Err(_)`, but Sentry never saw it. Funnel error sites through
 //! `report_error` so they show up tagged and grep-friendly in Sentry.
+pub(crate) mod progress_tracing;
+pub(crate) mod telemetry;
+
+#[path = "observability_channel_message.rs"]
+mod channel_message;
+#[cfg(feature = "crash-reporting")]
+pub use channel_message::is_channel_message_not_found_event;
 
 use std::fmt::Display;
+
+#[cfg(feature = "crash-reporting")]
+#[path = "observability_release_tag.rs"]
+mod release_tag;
+#[cfg(feature = "crash-reporting")]
+use release_tag::{parse_release_tag, parse_version};
 
 #[path = "observability_availability.rs"]
 mod availability;
@@ -104,7 +117,7 @@ pub enum ExpectedErrorKind {
     SessionExpired,
     /// Boot-window failure where the in-process core HTTP listener
     /// (`127.0.0.1:<port>`) is not yet accepting connections, so a sibling
-    /// component (frontend RPC relay, agent-integrations client) sees a TCP
+    /// component (frontend RPC relay, integrations client) sees a TCP
     /// connect refused. The condition self-resolves once the core finishes
     /// binding — typically within a few seconds of app launch — and no retry
     /// on the calling side can do better than waiting it out.
@@ -188,7 +201,7 @@ pub enum ExpectedErrorKind {
     /// returned an empty response"` is also demoted — no per-channel typed
     /// suppression needed.
     EmptyProviderResponse,
-    /// The core has no backend transport installed (built and run without
+    /// The core has no hosted backend registered (built and run without
     /// `openhuman-tinyhumans`), so a hosted-backend call could not be sent
     /// at all. Expected build state, not a defect: the core runs agents,
     /// memory and tools without any TinyHumans connection, and every
@@ -696,7 +709,7 @@ pub fn expected_error_kind(message: &str) -> Option<ExpectedErrorKind> {
 /// (codex CR on #3911). Both arms anchor on local-emit fragments rather than a
 /// bare `contains("database or disk is full")` so the silencer does not match a
 /// non-2xx backend response body whose payload happens to mention the phrase
-/// (e.g. an `api.tinyhumans.ai` 5xx whose server-side SQLite is full). Non-2xx
+/// (e.g. a managed-backend 5xx whose server-side SQLite is full). Non-2xx
 /// backend bodies are framed by
 /// `integrations::client::post` / `composio::client` as `"Backend returned
 /// <status> <reason> for <METHOD> <url>: <detail>"` — an operator-actionable
@@ -929,7 +942,7 @@ fn is_embedding_model_rejected(lower: &str) -> bool {
 ///   streaming 401s still escalate — guarded by
 ///   `does_not_classify_streaming_byo_key_401_as_session_expired`.
 /// - `"SESSION_EXPIRED: backend session not active — sign in to resume LLM work"`
-///   — the `scheduler_gate::is_signed_out` sentinel from
+///   — the `llm_gate::is_signed_out` sentinel from
 ///   `providers::openhuman_backend::resolve_bearer`.
 /// - `"no backend session token; run auth_store_session first"` and
 ///   `"session JWT required"` — local pre-flight guards that fire when the
@@ -1071,7 +1084,7 @@ pub fn is_local_provider_unreachable_message(text: &str) -> bool {
 }
 
 /// Detect the in-process-core boot-window shape: a sibling component
-/// (frontend RPC relay, agent-integrations / composio HTTP clients) tried to
+/// (frontend RPC relay, integrations / composio HTTP clients) tried to
 /// reach the embedded core's `127.0.0.1:<port>` listener before it finished
 /// binding, so the kernel returned `Connection refused`. The condition
 /// self-resolves once startup completes — Sentry has no remediation path.
@@ -1110,7 +1123,7 @@ pub fn is_local_provider_unreachable_message(text: &str) -> bool {
 /// and the canonical body shape:
 ///
 /// ```text
-/// error sending request for url (http://127.0.0.1:18474/agent-integrations/composio/connections)
+/// error sending request for url (http://127.0.0.1:18474/integrations/composio/connections)
 ///   → client error (Connect) → tcp connect error → Connection refused (os error 61)
 /// ```
 ///
@@ -1257,7 +1270,7 @@ fn is_ollama_user_config_rejection(lower: &str) -> bool {
 /// can't reach the server at all.
 ///
 /// These are user-environment problems — VPN drop, captive portal, ISP-level
-/// block (OPENHUMAN-TAURI-32: user in RU couldn't reach `api.tinyhumans.ai`),
+/// block (OPENHUMAN-TAURI-32: user in RU couldn't reach the managed backend),
 /// firewall — that no amount of retry / fallback on our side can resolve.
 /// Sentry has no signal to act on (no status, no trace, no payload), so each
 /// occurrence is pure noise. Classify them as expected so the report site
@@ -1471,7 +1484,7 @@ fn is_upstream_edge_block_message(lower: &str) -> bool {
 /// [`crate::integrations::client::IntegrationClient::post`] / `get`
 /// and [`crate::integrations::composio::client::ComposioClient`] is:
 /// `"Backend returned <status> <reason> for <METHOD> <url>: <detail>"` — e.g.
-/// `"Backend returned 400 Bad Request for POST https://api.tinyhumans.ai/agent-integrations/composio/authorize: Composio authorization failed: 400 …"`
+/// `"Backend returned 400 Bad Request for POST https://api.example.com/integrations/composio/authorize: Composio authorization failed: 400 …"`
 /// (OPENHUMAN-TAURI-BC: user submitted SharePoint authorize without filling in
 /// the required Tenant Name field). The backend correctly returned a 4xx; the
 /// UI already surfaces the structured error to the user via toast — Sentry has
@@ -1676,7 +1689,7 @@ fn is_provider_user_state_message(lower: &str) -> bool {
     }
 
     // TAURI-RUST-34H — composio backend endpoint (e.g.
-    // `/agent-integrations/composio/connections`) wraps an upstream
+    // `/integrations/composio/connections`) wraps an upstream
     // Cloudflare anti-bot challenge as `Backend returned 500 Internal
     // Server Error … 403 <!DOCTYPE html>…<title>Just a moment...</title>…`.
     // The CF interstitial is keyed by the user's network reputation /
@@ -2071,7 +2084,7 @@ fn report_expected_message(kind: ExpectedErrorKind, message: &str, domain: &str,
         }
         ExpectedErrorKind::ModuleUnavailable => log_module_unavailable(domain, operation, message),
         ExpectedErrorKind::BackendUnavailable => {
-            // Build-state condition: no backend transport is installed, so
+            // Build-state condition: no hosted backend is registered, so
             // the hosted backend is unreachable by construction. Nothing to
             // fix in Sentry — the host chose a backend-less core.
             tracing::debug!(
@@ -2969,7 +2982,7 @@ pub fn is_transient_message_failure(msg: &str) -> bool {
         || contains_transient_transport_phrase(&lower)
 }
 
-/// Sentinel prefix stamped on a `/teams/me/usage` probe error that the
+/// Sentinel prefix stamped on a team-usage probe error that the
 /// failure-backoff in `crate::integrations::client::budget_gate` short-circuited — i.e. an
 /// already-reported repeat within the backoff window. The FIRST failure of a
 /// streak propagates its real error string and reports normally; only the
@@ -3093,7 +3106,10 @@ pub fn is_insufficient_credits_event(event: &sentry::protocol::Event<'_>) -> boo
 /// [`tinyinference_llm::failure::body_indicates_quota_exhausted`], so
 /// the emit-site guard and this `before_send` net can't drift. Shared with the
 /// event-level filter [`is_quota_exhausted_event`].
-pub use tinyinference_llm::failure::body_indicates_quota_exhausted as is_quota_exhausted_message;
+#[cfg(any(feature = "crash-reporting", test))]
+fn is_quota_exhausted_message(body: &str) -> bool {
+    tinyinference_llm::failure::body_indicates_quota_exhausted(body)
+}
 
 /// Defense-in-depth `before_send` filter for provider **monthly-quota
 /// exhausted** events (TAURI-RUST-C9A): the user's third-party plan has spent
@@ -3206,50 +3222,6 @@ pub fn is_windows_file_system_limitation_event(event: &sentry::protocol::Event<'
         .values
         .iter()
         .any(|exception| exception.value.as_deref().is_some_and(check))
-}
-
-/// 404 on PATCH/DELETE to a channel-message path is an expected backend state
-/// (user deleted the message provider-side, backend GC'd the relay row). The
-/// primary suppression lives in `authed_json` via `parse_message_path` +
-/// defense-in-depth inline check. This filter is the outermost safety net for
-/// any future call site that bypasses both. Targets OPENHUMAN-TAURI-R7.
-///
-/// Match criteria (all required):
-/// - tag `domain == "backend_api"`
-/// - tag `failure == "non_2xx"`
-/// - tag `status == "404"`
-/// - tag `method == "PATCH"` or `"DELETE"`
-/// - event message or exception value contains both `"/channels/"` and `"/messages/"`
-#[cfg(feature = "crash-reporting")]
-pub fn is_channel_message_not_found_event(event: &sentry::protocol::Event<'_>) -> bool {
-    let tags = &event.tags;
-    if tags.get("domain").map(String::as_str) != Some("backend_api") {
-        return false;
-    }
-    if tags.get("failure").map(String::as_str) != Some("non_2xx") {
-        return false;
-    }
-    if tags.get("status").map(String::as_str) != Some("404") {
-        return false;
-    }
-    let method = tags.get("method").map(String::as_str).unwrap_or("");
-    if method != "PATCH" && method != "DELETE" {
-        return false;
-    }
-    event_contains_channel_message_path(event)
-}
-
-#[cfg(feature = "crash-reporting")]
-fn event_contains_channel_message_path(event: &sentry::protocol::Event<'_>) -> bool {
-    let has_pattern = |s: &str| s.contains("/channels/") && s.contains("/messages/");
-    if event.message.as_deref().is_some_and(has_pattern) {
-        return true;
-    }
-    event
-        .exception
-        .values
-        .iter()
-        .any(|exc| exc.value.as_deref().is_some_and(has_pattern))
 }
 
 #[cfg(feature = "crash-reporting")]
@@ -3450,26 +3422,6 @@ pub fn is_stale_release_event(event: &sentry::protocol::Event<'_>) -> bool {
             current_minor.saturating_sub(event_minor) > MAX_AGE_MINOR_VERSIONS
         })
     })
-}
-
-/// Parse a Sentry release tag like `"openhuman@0.58.0"` or
-/// `"openhuman@0.58.0+abc123def456"` into `(major, minor)`.
-#[cfg(feature = "crash-reporting")]
-fn parse_release_tag(tag: &str) -> Option<(u32, u32)> {
-    // Strip the `openhuman@` prefix
-    let after_at = tag.split('@').nth(1)?;
-    // Get the version part before any `+` suffix
-    let version = after_at.split('+').next()?;
-    parse_version(version)
-}
-
-/// Parse a `"MAJOR.MINOR.PATCH"` version string into `(major, minor)`.
-#[cfg(feature = "crash-reporting")]
-fn parse_version(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.splitn(3, '.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts.next()?.parse::<u32>().ok()?;
-    Some((major, minor))
 }
 
 #[cfg(test)]

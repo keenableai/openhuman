@@ -20,16 +20,17 @@ mod registration_scope;
 pub use registration_scope::ApprovalScope;
 pub mod rpc;
 pub mod schemas;
+mod storage_schema;
 pub mod store;
 mod store_documents;
 mod store_import;
+pub(crate) use storage_schema::storage_schema;
 pub(crate) use store_documents::import_source;
 pub mod types;
 
 pub use gate::{
     is_detached_request, is_unanswered_approval_reason, parse_approval_reply, ApprovalChatContext,
-    ApprovalError, ApprovalGate, FlowRunContext, APPROVAL_CHAT_CONTEXT,
-    APPROVAL_COPILOT_STREAM_CONTEXT, APPROVAL_FLOW_RUN_CONTEXT, APPROVAL_UNANSWERED_PHRASE,
+    ApprovalError, ApprovalGate, ApprovalTurnContext, FlowRunContext, APPROVAL_UNANSWERED_PHRASE,
 };
 pub use redact::{redact_args, summarize_action};
 pub use schemas::all_controller_schemas as all_approval_controller_schemas;

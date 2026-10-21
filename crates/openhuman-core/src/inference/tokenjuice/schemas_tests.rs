@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::runtime::DispatchCtx;
 
 #[test]
 fn all_schemas_have_namespace() {
@@ -175,10 +176,11 @@ fn compress_declares_explicit_as_an_enum_of_the_accepted_kinds() {
 
 #[tokio::test]
 async fn every_tokenjuice_method_answers_component_disabled_when_juice_is_off() {
+    type ControllerHandler = fn(DispatchCtx, Map<String, Value>) -> ControllerFuture;
     let mut set = crate::core::runtime::ComponentSet::all();
     set.juice = false;
     let ctx = crate::core::runtime::context::CoreContext::for_test_with_components(set);
-    let handlers: [fn(Map<String, Value>) -> ControllerFuture; 8] = [
+    let handlers: [ControllerHandler; 8] = [
         handle_detect,
         handle_compress,
         handle_cache_stats,
@@ -188,9 +190,10 @@ async fn every_tokenjuice_method_answers_component_disabled_when_juice_is_off() 
         handle_savings_stats,
         handle_savings_reset,
     ];
+    let dispatch = DispatchCtx::new(ctx.clone());
     crate::core::runtime::context::CoreContext::scope(ctx, async {
         for handler in handlers {
-            let err = handler(Map::new()).await.unwrap_err();
+            let err = handler(dispatch.clone(), Map::new()).await.unwrap_err();
             let decoded = crate::core::StructuredRpcError::decode(&err).expect("typed error");
             assert_eq!(decoded.message, "COMPONENT_DISABLED:juice");
         }
@@ -203,9 +206,11 @@ async fn tokenjuice_methods_are_not_gated_when_juice_is_on() {
     let ctx = crate::core::runtime::context::CoreContext::for_test_with_components(
         crate::core::runtime::ComponentSet::all(),
     );
-    crate::core::runtime::context::CoreContext::scope(ctx, async {
+    crate::core::runtime::context::CoreContext::scope(ctx.clone(), async {
         // Gate passes; the handler then fails on its own missing param.
-        let err = handle_detect(Map::new()).await.unwrap_err();
+        let err = handle_detect(DispatchCtx::new(ctx.clone()), Map::new())
+            .await
+            .unwrap_err();
         assert!(!err.contains("COMPONENT_DISABLED"), "{err}");
     })
     .await;

@@ -2,6 +2,7 @@ use super::{
     all_controller_schemas, all_registered_controllers, controller_value, schemas, string_param,
 };
 use crate::core::runtime::context::CoreContext;
+use crate::core::runtime::DispatchCtx;
 use crate::core::runtime::DomainSet;
 use serde_json::{Map, Value};
 
@@ -59,8 +60,8 @@ async fn computer_status_handler_returns_serialized_status() {
     let ctx =
         CoreContext::for_test_with_config(DomainSet::full(), crate::config::Config::default());
 
-    let status = CoreContext::scope(ctx, async {
-        super::handle_computer_status(Map::new()).await
+    let status = CoreContext::scope(ctx.clone(), async {
+        super::handle_computer_status(DispatchCtx::new(ctx.clone()), Map::new()).await
     })
     .await
     .expect("computer status should serialize");
@@ -78,22 +79,34 @@ async fn forgetting_sites_reports_how_many_went() {
     for site in ["shop.test", "books.test"] {
         std::fs::write(sites.join(format!("{site}.json")), b"{}").unwrap();
     }
+    let workspace = config.workspace_dir.clone();
     let ctx = CoreContext::for_test_with_config(DomainSet::full(), config);
 
-    let (one, every) = CoreContext::scope(ctx, async {
+    let (one, every) = CoreContext::scope(ctx.clone(), async {
         let mut one = Map::new();
         one.insert(
             "site".to_string(),
             Value::String("https://www.shop.test/cart".to_string()),
         );
-        let one = super::handle_browser_forget_sites(one).await;
-        (one, super::handle_browser_forget_sites(Map::new()).await)
+        let one = super::handle_browser_forget_sites(DispatchCtx::new(ctx.clone()), one).await;
+        let every =
+            super::handle_browser_forget_sites(DispatchCtx::new(ctx.clone()), Map::new()).await;
+
+        let reopened = crate::modules::site_memory_host::SiteStore::open(&workspace)
+            .expect("reopen active site store");
+        assert!(reopened.load("shop.test").await.unwrap().hints.is_empty());
+        assert!(reopened.load("books.test").await.unwrap().hints.is_empty());
+        assert_eq!(reopened.forget(None).await.unwrap(), 0);
+
+        (one, every)
     })
     .await;
 
     assert_eq!(one.unwrap()["forgotten"], 1);
     assert_eq!(every.unwrap()["forgotten"], 1);
-    assert!(!sites.join("books.test.json").exists());
+
+    assert!(sites.join("shop.test.json").exists());
+    assert!(sites.join("books.test.json").exists());
 }
 
 #[test]
@@ -126,7 +139,7 @@ async fn a_blank_or_unreadable_site_forgets_nothing() {
     for site in [Value::String("  ".to_string()), Value::from(7)] {
         let mut params = Map::new();
         params.insert("site".to_string(), site);
-        let error = super::handle_browser_forget_sites(params)
+        let error = super::handle_browser_forget_sites(DispatchCtx::process_default(), params)
             .await
             .unwrap_err();
         assert!(error.contains("must name a site"), "{error}");
