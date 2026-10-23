@@ -9,6 +9,7 @@ mod post_commit;
 mod prelude;
 #[path = "runtime_session/prompt.rs"]
 mod prompt;
+mod prompt_refresh;
 #[path = "runtime_session/prompt_surface.rs"]
 mod prompt_surface;
 #[path = "runtime_session_usage.rs"]
@@ -29,11 +30,11 @@ type ActiveTerminalSidecar = std::sync::Arc<
 use std::sync::Arc;
 
 use anyhow::Result;
-use tinyagents_graph::goals::ThreadGoalStatus;
 use tinyagents_harness::multimodal::markers::extract_image_placeholders_in_text;
+use tinyagents_harness::tool::ToolSnapshot;
 use tinyagents_runtime::{
-    CommitReceipt, ResumePreparation, SessionBuilder, SessionTerminal, ToolSnapshot,
-    TranscriptTarget, TurnPreparation,
+    CommitReceipt, ResumePreparation, SessionBuilder, SessionTerminal, TranscriptTarget,
+    TurnPreparation,
 };
 use tinyinference_llm::message::Message;
 
@@ -91,6 +92,7 @@ struct OpenHumanTurnPrelude {
             crate::agent::tinyagents::host::OpenHumanRunContext,
         >,
     >,
+    pack_registry_handle: Option<tinyagents_harness_tools::skills::PackRegistryHandle>,
     tool_dispatcher: Arc<dyn tinytools_agent::dialect::ToolDialect>,
     workspace_dir: std::path::PathBuf,
     action_dir: std::path::PathBuf,
@@ -283,7 +285,7 @@ impl OpenHumanSessionHost {
             tool_result_budget_bytes,
             payload_summarizer: self.payload_summarizer.clone().filter(|_| juice_on),
             // Rooted outside the project; see `artifact_wiring` (#6408, #6483).
-            artifact_store: Some(artifact_store),
+            artifact_store,
             tokenjuice_compaction_enabled: tokenjuice_compaction_enabled && juice_on,
             tokenjuice_compression: self.tokenjuice_compression,
             runtime_config: self.runtime_config.clone(),
@@ -429,11 +431,9 @@ impl OpenHumanSessionHost {
                         );
                         options.run_context.data.memory_turn = memory_turn;
                         request.input = user_message_from_text(&enriched);
-                        let mut preparation =
-                            prelude.prepare(new_session).await.map_err(|error| {
-                                tinyagents_runtime::RuntimeError::Driver(error.to_string())
-                            })?;
-                        prelude.refresh_permanent_prefix(&mut preparation, view.prefix);
+                        let mut preparation = prelude
+                            .prepare_turn(new_session, &view, &transcript_snapshot, request)
+                            .await?;
                         if turn.overrides.suppress_tools {
                             // One-off tool-less turn: must not become the
                             // thread's recorded tool list.
@@ -619,6 +619,10 @@ pub(super) mod tool_surface;
 #[cfg(test)]
 #[path = "runtime_session_juice_tests.rs"]
 mod juice_tests;
+
+#[cfg(test)]
+#[path = "runtime_session_goal_tests.rs"]
+mod goal_tests;
 
 mod parent_snapshot;
 #[path = "../../integrations/prelude_integrations.rs"]

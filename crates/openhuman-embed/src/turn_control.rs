@@ -361,11 +361,12 @@ impl Turn {
         });
         // Everything the core honours for this turn rides one explicit value;
         // nothing is recovered from an ambient scope below this point.
-        let chat_env = openhuman_core::inference::host_runtime::ops::AgentChatEnv {
+        let chat_env = openhuman_core::agent_runs::agent_chat::AgentChatEnv {
             progress: self.progress.take(),
             host: openhuman_core::agent::turn_env::HostTurnEnv {
                 command_environment: self.tool_env.take(),
                 model_budget: budget.clone(),
+                dispatch_admission: self.dispatch_admission.take(),
                 spawn_depth_limit: self.spawn_depth_limit,
                 cancellation: self.native_cancellation.clone(),
                 hooks: std::mem::take(&mut self.hooks),
@@ -436,6 +437,7 @@ impl Turn {
                 crate::error::CoreError::InsecureRoute { .. } => "insecure_route",
                 crate::error::CoreError::InvalidRoute { .. } => "invalid_route",
                 crate::error::CoreError::AgentRemoved { .. } => "agent_removed",
+                crate::error::CoreError::DispatchAdmission { .. } => "dispatch_admission",
             };
             log::debug!("[embed][agent] turn_failed session={session_id} kind={tag}");
         });

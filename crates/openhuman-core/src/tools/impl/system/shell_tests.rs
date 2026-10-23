@@ -1,7 +1,7 @@
 use super::*;
 use crate::modules::tinybox::host_runtime::{NativeRuntime, RuntimeAdapter};
+use crate::security::policy::CommandClass;
 use crate::security::{AutonomyLevel, SecurityPolicy};
-use tinybox_bus::CommandClass;
 
 fn test_security(autonomy: AutonomyLevel) -> Arc<SecurityPolicy> {
     Arc::new(SecurityPolicy {
@@ -60,6 +60,8 @@ fn test_security_with_env_cmd() -> Arc<SecurityPolicy> {
     })
 }
 
+#[path = "shell_tests_keep_running_tests.rs"]
+mod keep_running_tests;
 #[path = "shell_tests_platform_tests.rs"]
 mod platform_tests;
 #[path = "shell_tests_runtime_and_sandbox_tests.rs"]

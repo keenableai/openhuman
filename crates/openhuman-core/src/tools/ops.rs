@@ -7,7 +7,7 @@ use crate::security::{AuditLogger, SecurityPolicy};
 use crate::tools::delegate::DelegateTool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyagents_harness::tools::{CurrentTimeTool, ResolveTimeTool};
+use tinyagents_harness_tools::{CurrentTimeTool, ResolveTimeTool};
 use tinytools::Tool;
 use tinytools_std::detect_tools::DetectToolsTool;
 use tinytools_std::filesystem::{
@@ -86,6 +86,42 @@ pub fn all_tools_with_runtime(
     root_config: &crate::config::Config,
     approval_workspace_root: Option<&std::path::Path>,
 ) -> Vec<Box<dyn Tool>> {
+    all_tools_with_runtime_and_pack_handle(
+        config,
+        security,
+        runtime,
+        audit,
+        browser_config,
+        http_config,
+        action_dir,
+        agents,
+        root_config,
+        approval_workspace_root,
+    )
+    .0
+}
+
+/// Build the full tool registry and return its pack handle alongside it.
+///
+/// The handle belongs to the session that owns the registry; callers retain it
+/// so later registry refreshes can rebind `use_skill` without inspecting the
+/// tool's generic dispatch extension.
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
+pub fn all_tools_with_runtime_and_pack_handle(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    runtime: Arc<dyn RuntimeAdapter>,
+    audit: Arc<AuditLogger>,
+    browser_config: &crate::config::BrowserConfig,
+    http_config: &crate::config::HttpRequestConfig,
+    action_dir: &std::path::Path,
+    agents: &HashMap<String, DelegateAgentConfig>,
+    root_config: &crate::config::Config,
+    approval_workspace_root: Option<&std::path::Path>,
+) -> (
+    Vec<Box<dyn Tool>>,
+    tinyagents_harness_tools::skills::PackRegistryHandle,
+) {
     let shell: Box<dyn Tool> = Box::new(ShellTool::with_config(
         security.clone(),
         Arc::clone(&runtime),
@@ -103,6 +139,8 @@ pub fn all_tools_with_runtime(
 
     let mut tools: Vec<Box<dyn Tool>> = vec![
         shell,
+        // Follows a `shell` command left running past its yield point.
+        Box::new(ShellProcessTool::new()),
         Box::new(FileReadTool::new(security.clone())),
         file_write,
         // Coding-harness baseline tools (issue #1205): file navigation
@@ -182,9 +220,7 @@ pub fn all_tools_with_runtime(
     // lifecycle. doctor/health/cost/dashboard/security reads are default-ON.
     // service_status / daemon_host_prefs_get default-ON; the lifecycle
     // mutators ship default-OFF via `tools::user_filter` (service_lifecycle).
-    tools.extend(crate::platform::doctor::tools::registered_tools(
-        config.clone(),
-    ));
+    tools.extend(crate::doctor::tools::registered_tools(config.clone()));
     tools.extend(crate::platform::health::tools::registered_tools());
     tools.extend(crate::platform::cost::tools::registered_tools(
         config.clone(),
@@ -253,7 +289,9 @@ pub fn all_tools_with_runtime(
     if crate::inference::tokenjuice::enabled(root_config) {
         tools.push(Box::new(retrieve_tool_output_tool()));
         tools.push(Box::new(
-            crate::inference::tokenjuice::TokenjuiceRetrieveTool::new(),
+            tinyjuice_host::retrieve_tool::RetrieveToolOutputTool::new(Arc::new(|token, range| {
+                Box::pin(async move { crate::inference::tokenjuice::retrieve(token, range).await })
+            })),
         ));
     } else {
         tracing::debug!("[tools::ops] juice component off; recovery tools not registered");
@@ -480,7 +518,7 @@ pub fn all_tools_with_runtime(
         tools.push(Box::new(DelegateTool::new_with_options(
             delegate_agents,
             security.clone(),
-            crate::inference::provider::ProviderRuntimeOptions {
+            crate::tools::delegate::ProviderRuntimeOptions {
                 auth_profile_override: None,
                 openhuman_dir: root_config
                     .config_path
@@ -572,13 +610,13 @@ pub fn all_tools_with_runtime(
     // cover the `delegate_*` tools synthesised later by
     // `orchestrator_tools::collect_orchestrator_tools` — which never pass
     // through this function.
-    crate::tools::toolpacks::append_pack_tools(&mut tools);
+    let pack_registry = crate::tools::toolpacks::append_pack_tools(&mut tools);
     // The lookup half of `ToolExposure::Deferred` is not registered here: the
     // tinyagents harness advertises its intrinsic `tool_search` bridge
     // (a found tool is then called by its own name) whenever a run has a
     // deferred tool (`tool::discover`), ranked by whatever `agent::tinyagents::discovery` installed. A host-registered
     // `tool_search` would shadow that bridge.
-    tools
+    (tools, pack_registry)
 }
 
 #[path = "ops_tool_groups.rs"]

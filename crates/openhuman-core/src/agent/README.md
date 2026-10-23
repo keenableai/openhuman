@@ -297,7 +297,7 @@ Delegation and coordination:
 | `subagent_host/` | Runs a child agent: definition, model and tool narrowing, prompt, checkpoints, progress ([README](subagent_host/README.md)) |
 | `orchestration/` | Spawn/steer/wait tools, teams, command center, workflow runs, worktrees, background delivery ([README](orchestration/README.md)) |
 | `triage/` | Classifies `TriggerEnvelope`s and escalates ([README](triage/README.md)) |
-| `goals/` | Host adapters around `tinyagents_graph::goals` and the `goal_*` tools ([README](goals/README.md)) |
+| `goals/` | Host adapters around `tinyagents_harness_tools::goals` and the `goal_*` tools ([README](goals/README.md)) |
 | `todos/` | Session-scoped todo list over the TinyAgents todo store ([README](todos/README.md)) |
 | [`../plan_review/`](../plan_review/) | `request_plan_review` gate that parks a web-chat turn until the user decides |
 | [`tools.rs`](./tools.rs), `tools/` | Loop control tools: `delegate`, `plan_exit`, `todo`, `run_workflow`/`await_workflow` (with `skills`) ([README](tools/README.md)) |
@@ -374,7 +374,7 @@ All controllers register under `DomainGroup::Agent` in [`core/all.rs`](../core/a
 | `subagent` | [`orchestration/subagent_control.rs`](./orchestration/subagent_control.rs) | `cancel`, `steer` for running sub-agents |
 
 `agent.chat` and `agent.chat_simple` load config and call
-`inference::host_runtime::rpc::agent_chat` / `agent_chat_simple`, which
+`agent_runs::agent_chat::agent_chat` / `inference::host_runtime::ops::agent_chat_simple`, which
 build an `OpenHumanSessionHost`. `chat_simple` is a bare provider call with
 no tools. The JSON-RPC server itself is in [`crates/openhuman-rpc`](../../../openhuman-rpc/).
 

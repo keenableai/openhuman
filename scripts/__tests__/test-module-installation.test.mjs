@@ -156,6 +156,15 @@ test("CI exports the staged TinyMCP library for the multi-server suite", () => {
   );
 });
 
+test("CI exports the staged TinyChannels library for its runtime suite", () => {
+  const source = readFileSync(installer, "utf8");
+  assert.match(
+    source,
+    /echo "OPENHUMAN_CHANNELS_TEST_ARTIFACT=\$\{tinychannels_artifact\}"/,
+    "the released-runtime test loads the verified TinyChannels artifact directly",
+  );
+});
+
 test("MCP registry Rust integration tests run serially", () => {
   const source = readFileSync(localRustRunner, "utf8");
   assert.match(
@@ -177,9 +186,15 @@ test("config/auth in-process integration tests run serially in both full runners
       start >= 0 && end > start,
       `${runner} has an in-process module runner`,
     );
+    const runnerFunction = source.slice(start, end);
     assert.match(
-      source.slice(start, end),
-      /config_auth_app_state_connectivity_e2e[\s\S]*?--test-threads=1/,
+      runnerFunction,
+      /\(config\|auth\|app_state\|connectivity\)_e2e/,
+      `${runner} isolates the four split config/auth groups`,
+    );
+    assert.match(
+      runnerFunction,
+      /--test-threads=1/,
       `${runner} serializes auth RPC fixtures that share process-wide listeners`,
     );
   }
@@ -380,7 +395,7 @@ for (const [runner, archiveVariable, directoryVariable] of [
 }
 
 for (const runner of ["test-rust-with-mock.sh", "test-rust-e2e.sh"]) {
-  test(`${runner} supplies the TinyMCP artifact and executes ignored registry cases`, () => {
+  test(`${runner} supplies the TinyMCP artifact to registry cases`, () => {
     const source = readFileSync(
       new URL(`../${runner}`, import.meta.url),
       "utf8",
@@ -483,11 +498,19 @@ for (const runner of ["test-rust-with-mock.sh", "test-rust-e2e.sh"]) {
           run.split("\n")[0].split(":").includes(moduleDir),
           "the pinned TinyMCP release directory is on the module search path",
         );
-        assert.match(
-          run,
-          /^ARG=--ignored$/m,
-          "ignored cases must actually execute",
-        );
+        if (runner === "test-rust-with-mock.sh") {
+          assert.doesNotMatch(
+            run,
+            /^ARG=--ignored$/m,
+            "Linux-supported cases run in the normal test pass",
+          );
+        } else {
+          assert.match(
+            run,
+            /^ARG=--ignored$/m,
+            "the E2E runner explicitly selects the live registry cases",
+          );
+        }
         assert.match(run, /^ARG=--test-threads=1$/m);
       }
       assert.match(

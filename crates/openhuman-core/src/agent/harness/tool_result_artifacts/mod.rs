@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tinyagents_harness::artifacts::tool_results::{self, ArtifactRead, ToolResultArtifactStore};
-use tinystoragedrivers::BlobStore;
+use tinystoragedrivers_api::BlobStore;
 
 use crate::agent::harness::artifact_offload::{SanitizingRedactor, READ_TOOL};
 use tinytools_std::filesystem::FileReadTool;
@@ -157,10 +157,11 @@ pub(crate) fn in_memory_tool_result_store(
     materialize_root: PathBuf,
     session_key: impl Into<String>,
 ) -> HostArtifactStore {
-    let scope = tinystoragedrivers::Scope::new("local").expect("scope");
-    let blobs = tinystoragedrivers::MemoryStorage::new();
-    let blobs = tinystoragedrivers::StorageBackend::for_scope(&blobs, &scope).expect("scope");
-    new_tool_result_store(Arc::clone(blobs.blobs()), materialize_root, session_key)
+    let backend = crate::storage::test_support::memory_backend();
+    let storage = backend
+        .for_scope(&crate::storage::Scope::local())
+        .expect("scope");
+    new_tool_result_store(Arc::clone(storage.blobs()), materialize_root, session_key)
 }
 
 /// The artifact a tool call reads, if any — `file_read`, possibly wrapped in
@@ -174,7 +175,7 @@ pub(crate) fn artifact_read_target(
     tool_name: &str,
     args: &Value,
 ) -> Option<ArtifactRead> {
-    let wrapper = tinyagents_harness::tool::packs::USE_SKILL;
+    let wrapper = tinyagents_harness_tools::skills::USE_SKILL;
     match store {
         Some(store) => store.read_target(tool_name, args, wrapper),
         None => tool_results::artifact_read_target(tool_name, args, READ_TOOL, wrapper),

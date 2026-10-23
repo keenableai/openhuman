@@ -9,10 +9,8 @@
 //! so every host seam receives the same explicit carrier rather than recovering
 //! product state from a task-local.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::time::Instant;
 
 use tokio::sync::mpsc::Sender;
 
@@ -130,6 +128,9 @@ pub(crate) struct SessionTurnSidecar {
     /// and the post-commit UI use the same complete ledger.
     pub subagents: Vec<SubagentUsageEntry>,
     pub duration: Option<Duration>,
+    /// Typed host refusal captured before the neutral runtime's string error
+    /// boundary. Read only by the same logical turn that populated it.
+    pub dispatch_refusal: Option<super::super::budget::DispatchRefusal>,
     pub tool_outcomes: Vec<ToolCallOutcome>,
     pub hit_cap: bool,
     pub wrap_up_injected: bool,
@@ -149,115 +150,9 @@ pub(crate) struct SessionTurnSidecar {
     pub deferred_terminal: Option<crate::agent::tinyagents::turn_outcome::DeferredTurnTerminal>,
 }
 
-/// Immutable inputs to the host's pre-dispatch policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DispatchInputs {
-    pub pause_requested: bool,
-    pub pause_completed_calls: u64,
-    pub pause_cap: u64,
-    pub remaining: Option<Duration>,
-    pub observed_max: Option<Duration>,
-    pub observed_samples: u64,
-}
-
-/// Outcome of the host's pre-dispatch policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchDecision {
-    Allow,
-    RefusePaused {
-        completed_model_calls: u64,
-        cap: u64,
-    },
-    RefuseBudget {
-        remaining_ms: u64,
-        observed_max_ms: u64,
-        observed_samples: u64,
-    },
-}
-
-/// Decide whether a child can be started using only evidence recorded on this
-/// turn. This stays host policy: TinyAgents owns the loop, not OpenHuman's
-/// pause and wall-clock refusal rules.
-pub fn decide_dispatch(inputs: DispatchInputs) -> DispatchDecision {
-    if inputs.pause_requested {
-        return DispatchDecision::RefusePaused {
-            completed_model_calls: inputs.pause_completed_calls,
-            cap: inputs.pause_cap,
-        };
-    }
-    let (Some(remaining), Some(observed_max)) = (inputs.remaining, inputs.observed_max) else {
-        return DispatchDecision::Allow;
-    };
-    if remaining < observed_max {
-        return DispatchDecision::RefuseBudget {
-            remaining_ms: remaining.as_millis().min(u128::from(u64::MAX)) as u64,
-            observed_max_ms: observed_max.as_millis().min(u128::from(u64::MAX)) as u64,
-            observed_samples: inputs.observed_samples,
-        };
-    }
-    DispatchDecision::Allow
-}
-
-/// Shared root-turn state used by all synchronous descendants and siblings to
-/// decide whether starting another delegate is still safe.
-#[derive(Debug)]
-pub struct TurnDispatchState {
-    pause_requested: AtomicBool,
-    pause_completed_calls: AtomicU64,
-    pause_cap: AtomicU64,
-    started: Instant,
-    budget: Option<Duration>,
-    observed_max_ms: AtomicU64,
-    observed_samples: AtomicU64,
-}
-
-impl TurnDispatchState {
-    pub fn new(budget: Option<Duration>) -> Self {
-        Self {
-            pause_requested: AtomicBool::new(false),
-            pause_completed_calls: AtomicU64::new(0),
-            pause_cap: AtomicU64::new(0),
-            started: Instant::now(),
-            budget,
-            observed_max_ms: AtomicU64::new(0),
-            observed_samples: AtomicU64::new(0),
-        }
-    }
-
-    pub fn record_pause_requested(&self, completed_model_calls: u64, cap: u64) {
-        self.pause_completed_calls
-            .store(completed_model_calls, Ordering::SeqCst);
-        self.pause_cap.store(cap, Ordering::SeqCst);
-        self.pause_requested.store(true, Ordering::SeqCst);
-    }
-
-    pub fn record_subagent_elapsed(&self, elapsed: Duration) {
-        let ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-        self.observed_samples.fetch_add(1, Ordering::SeqCst);
-        self.observed_max_ms.fetch_max(ms, Ordering::SeqCst);
-    }
-
-    pub fn snapshot(&self) -> DispatchInputs {
-        let observed_max = match self.observed_max_ms.load(Ordering::SeqCst) {
-            0 => None,
-            ms => Some(Duration::from_millis(ms)),
-        };
-        DispatchInputs {
-            pause_requested: self.pause_requested.load(Ordering::SeqCst),
-            pause_completed_calls: self.pause_completed_calls.load(Ordering::SeqCst),
-            pause_cap: self.pause_cap.load(Ordering::SeqCst),
-            remaining: self
-                .budget
-                .map(|budget| budget.saturating_sub(self.started.elapsed())),
-            observed_max,
-            observed_samples: self.observed_samples.load(Ordering::SeqCst),
-        }
-    }
-
-    pub fn check(&self) -> DispatchDecision {
-        decide_dispatch(self.snapshot())
-    }
-}
+#[path = "dispatch_control.rs"]
+mod dispatch_control;
+pub use dispatch_control::{decide_dispatch, DispatchDecision, DispatchInputs, TurnDispatchState};
 
 /// Explicit OpenHuman data carried by a top-level or child agent run.
 ///
@@ -269,6 +164,8 @@ impl TurnDispatchState {
 pub struct OpenHumanRunContext {
     /// Explicit shared model-call budget inherited by synchronous children.
     pub model_budget: Option<super::super::budget::ModelBudget>,
+    /// Host admission policy shared by this run and its synchronous descendants.
+    pub dispatch_admission: Option<Arc<dyn super::super::budget::PhysicalDispatchAdmission>>,
     /// The response format and output cap this root turn asks of every model
     /// call, and the slot its final call is reported into. Carried explicitly
     /// from the caller (`agent_chat`) through the session; children never
@@ -287,6 +184,10 @@ pub struct OpenHumanRunContext {
     pub progress: Option<Sender<AgentProgress>>,
     /// Stop policies evaluated after each model call.
     pub stop_hooks: Vec<Arc<dyn StopHook<tinyagents_harness::cost::TurnCost>>>,
+    /// The turn runs with `TurnOverrides::suppress_active_goal`: the thread
+    /// goal must not reach the model this turn. Set by the turn prelude; the
+    /// run-state block (which reads the goal from the store) follows it.
+    pub goal_suppressed: bool,
     /// Agent/turn tool callbacks, registered after the runtime's global ones.
     pub tool_hooks: Vec<Arc<dyn tinyagents_hooks::tool::ToolHook<OpenHumanRunContext>>>,
     /// Host cap on real tool invocations for this turn tree; `None` leaves the
@@ -400,6 +301,10 @@ pub struct OpenHumanRunContext {
     /// binding the compaction summarizer recalls under. A child run has its
     /// own and does not inherit it.
     pub(crate) memory_turn: Option<Arc<crate::memory::lifecycle::hooks::MemoryTurn>>,
+    /// Shell commands this turn left running past their yield point
+    /// (`sandbox::shell_processes`). Each run, child runs included, has its
+    /// own; dropping the last copy at the end of the run stops them.
+    pub(crate) shell_processes: Arc<crate::sandbox::shell_processes::ShellProcesses>,
 }
 
 /// The host callbacks and caps a turn's harness assembly installs, taken from
@@ -414,14 +319,15 @@ pub(crate) struct HarnessHostPolicy {
     pub(crate) tool_call_cap: Option<usize>,
 }
 
-#[cfg(test)]
-pub(crate) use super::operation_context::tool_context_with_approval;
 pub use super::operation_context::{approval_for_tool, OpenHumanRunExt};
 pub(crate) use super::operation_context::{
     command_environment_for_tool, dispatch_ctx_for_tool, memory_identity_for_tool,
     memory_in_prompt_for_tool, parent_agent_id_for_tool, sandbox_mode_for_tool,
-    task_recency_window_for_tool, turn_origin_for_tool, HostOperationContext,
+    shell_processes_for_tool, task_recency_window_for_tool, turn_origin_for_tool,
+    HostOperationContext,
 };
+#[cfg(test)]
+pub(crate) use super::operation_context::{test_turn_run, tool_context_with_approval};
 
 impl Default for OpenHumanRunContext {
     fn default() -> Self {
@@ -435,12 +341,14 @@ impl OpenHumanRunContext {
     pub fn new() -> Self {
         Self {
             model_budget: None,
+            dispatch_admission: None,
             response_shape: None,
             max_spawn_depth: None,
             origin: None,
             approval: Default::default(),
             progress: None,
             stop_hooks: Vec::new(),
+            goal_suppressed: false,
             tool_hooks: Vec::new(),
             tool_call_limit: None,
             untrusted_input_turn: false,
@@ -478,6 +386,7 @@ impl OpenHumanRunContext {
             required_output: None,
             tool_dialect: tinyagents_harness::config::ToolDispatcher::Auto,
             memory_turn: None,
+            shell_processes: crate::sandbox::shell_processes::ShellProcesses::new(),
         }
     }
 
@@ -583,6 +492,7 @@ impl OpenHumanRunContext {
     #[must_use]
     pub(crate) fn with_host_env(mut self, env: &crate::agent::turn_env::HostTurnEnv) -> Self {
         self.model_budget = env.model_budget.clone().or(self.model_budget);
+        self.dispatch_admission = env.dispatch_admission.clone().or(self.dispatch_admission);
         self.max_spawn_depth = env.spawn_depth_limit.or(self.max_spawn_depth);
         if let Some(cancellation) = &env.cancellation {
             self.cancellation = cancellation.clone();
@@ -619,6 +529,7 @@ impl OpenHumanRunContext {
         child.resolved_route = Arc::new(Mutex::new(None));
         child.memory_turn = None;
         child.response_shape = None;
+        child.shell_processes = crate::sandbox::shell_processes::ShellProcesses::new();
         child
     }
 
@@ -626,9 +537,10 @@ impl OpenHumanRunContext {
     ///
     /// A detached task keeps the authority, thread and workspace descriptor it
     /// needs to execute and deliver its own result, but it is no longer part of
-    /// the originating turn. In particular it cannot consume that turn's
-    /// dispatch budget, append to its usage ledger, or observe a cancellation
-    /// request that only stopped the interactive turn.
+    /// the originating turn's dispatch timer or subagent usage roll-up. It
+    /// still inherits the shared monetary budget and physical-dispatch policy,
+    /// and it does not observe cancellation that only stopped the interactive
+    /// turn.
     pub fn detached_child(&self) -> Self {
         let mut child = self.child();
         // The chat surface belongs to the turn that started it. A detached
@@ -638,6 +550,9 @@ impl OpenHumanRunContext {
         child.dispatch = None;
         child.subagent_usage = Arc::new(Mutex::new(Vec::new()));
         child.parent_subagent_usage = None;
+        // Detached work has its own terminal boundary; its typed refusal must
+        // never be mistaken for the interactive parent's failure.
+        child.session_sidecar = Arc::new(Mutex::new(SessionTurnSidecar::default()));
         child.cancellation = tinyagents_harness::cancel::CancellationToken::new();
         child
     }

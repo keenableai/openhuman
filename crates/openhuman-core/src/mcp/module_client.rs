@@ -66,6 +66,20 @@ pub(crate) trait McpModulePort: Send + Sync {
         confidential: bool,
     ) -> Result<Value, ModuleCallError>;
 
+    /// Calls a child object through an already-pinned module owner.
+    /// Implementations must not resolve, load, or pin a module when no owner is
+    /// already available.
+    async fn call_object_if_ready(
+        &self,
+        object_path: &str,
+        member: &str,
+        args: Value,
+        confidential: bool,
+    ) -> Result<Value, ModuleCallError> {
+        let _ = (object_path, member, args, confidential);
+        Err(ModuleCallError::Unavailable)
+    }
+
     async fn prepare_agent_tools(
         &self,
         request: PrepareAgentToolsRequest,
@@ -248,6 +262,7 @@ impl McpConfiguredClient {
                         description: tool.description,
                         input_schema: tool.input_schema,
                         meta: None,
+                        annotations: None,
                     })
                     .collect(),
                 None => {
@@ -361,7 +376,7 @@ impl McpConfiguredClient {
                     // Servers and audit rows from before the storage contract
                     // move into the module's storage before it reads them.
                     // Best effort: a failure is retried at the next open.
-                    crate::modules::import_legacy_mcp(
+                    let _ = crate::modules::import_legacy_mcp(
                         &crate::core::runtime::DispatchCtx::ambient(),
                         std::path::Path::new(&self.data_dir),
                     )

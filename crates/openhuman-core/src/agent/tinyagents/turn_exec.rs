@@ -14,11 +14,12 @@ use anyhow::Result;
 use tinyagents_harness::runtime::AgentHarness;
 use tinyagents_harness::runtime::{AgentInvocation, AgentTurnRequest, InvocationRuntime};
 use tinyagents_harness::store::{InMemoryStore as ToolResultArtifactIndexStore, StoreRegistry};
+use tinyagents_harness::tool::ToolSnapshot;
 use tinyagents_harness::turn_policy::effective_max_iterations;
 use tinyagents_runtime::turn_driver::{
     SubagentScope as DriverSubagentScope, TurnControls, TurnDriver, TurnScope,
 };
-use tinyagents_runtime::{DriverRequest, ToolSnapshot};
+use tinyagents_runtime::DriverRequest;
 
 use crate::agent::harness::tool_result_artifacts::TINYAGENTS_TOOL_RESULT_ARTIFACT_STORE;
 use crate::agent::tinyagents::host::OpenHumanRunContext;
@@ -35,7 +36,7 @@ use crate::agent::tinyagents::turn_plan::{
 use crate::agent::tinyagents::turn_run_error::map_turn_run_error;
 use crate::agent::tinyagents::turn_run_finalize::finalize_turn_outcome;
 use crate::agent::tinyagents::NativeSubagentRunContext;
-use crate::agent::tinyagents::{journal, routes, steering_forwarder};
+use crate::agent::tinyagents::{journal, steering_forwarder};
 use crate::inference::turn_models::TurnModels;
 use tinyagents_harness::events::EventSink;
 use tinyagents_harness::observability::turn_observer;
@@ -181,7 +182,10 @@ async fn drive_turn(
     let hosted_security_gate = hosted_root.is_some();
     let is_local = turn_models.is_local();
     // Wrap concrete routes before the invocation-local hosted resolver captures them.
-    let turn_models = turn_models.with_budget(run_context.model_budget.as_ref());
+    let turn_models = turn_models.with_host_controls(
+        run_context.model_budget.as_ref(),
+        run_context.dispatch_admission.clone(),
+    );
     let hosted_model_resolver = hosted_root.as_ref().map(|_| {
         Arc::new(turn_models.resolver()) as Arc<dyn tinyagents_harness::host::ModelResolver<()>>
     });
@@ -205,7 +209,7 @@ async fn drive_turn(
         deterministic_cacheable,
         is_local,
         run_context.tool_dialect,
-        crate::inference::reasoning::turn_reasoning_for(
+        crate::agent::tinyagents::thread_reasoning::turn_reasoning_for(
             &run_context,
             hosted_root.as_ref().map(|(base, _)| base.config.as_ref()),
             max_output_tokens,
@@ -553,7 +557,10 @@ async fn drive_turn(
             context_mw,
             host_policy: run_context.harness_host_policy(),
             tool_policy: tool_policy.clone(),
-            required_capabilities: routes::turn_required_capabilities(model),
+            required_capabilities: tinyagents_registry::WorkloadRouter::from_workload_routes(
+                "hint:vision",
+            )
+            .required_capabilities(model),
             deterministic_cacheable,
             has_route_fallback,
             dispatch: run_context.dispatch_ctx(),
@@ -575,6 +582,17 @@ async fn drive_turn(
                 .map(|parent| {
                     crate::storage::sessions::stores_or_ephemeral(&parent.workspace_dir).kv
                 }),
+            compaction_notice: Some({
+                let bridge = bridge.clone();
+                Arc::new(move || bridge.announce_compaction())
+            }),
+            state_store: run_context.parent.as_ref().map(|parent| {
+                (
+                    crate::storage::sessions::stores_or_ephemeral(&parent.workspace_dir).kv,
+                    parent.session_id.clone(),
+                )
+            }),
+            goal_suppressed: run_context.goal_suppressed,
         },
     );
     if let Some(scope) = run_context.response_shape.clone() {

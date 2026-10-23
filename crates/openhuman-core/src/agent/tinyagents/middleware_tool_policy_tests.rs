@@ -12,7 +12,7 @@ use crate::agent::tinyagents::middleware::tool_policy::ToolPolicyMiddleware;
 
 use crate::agent::orchestration::tools::{ArchetypeDelegationTool, DelegationTarget};
 use crate::tools::toolpacks::{append_pack_tools, bind_pack_registry};
-use tinyagents_harness::tool::packs::USE_SKILL;
+use tinyagents_harness_tools::skills::USE_SKILL;
 use tinytools::{PermissionLevel, ToolResult};
 use tinytools::{
     TaskProfile, TaskRiskLevel, ToolCapability, ToolPolicyAction, ToolPolicyDecision,
@@ -73,9 +73,9 @@ fn non_owner_middleware_at(allowed: PermissionLevel) -> ToolPolicyMiddleware {
             tool_description: "Build a workflow".to_string(),
         }),
     ];
-    append_pack_tools(&mut tools);
+    let pack_handle = append_pack_tools(&mut tools);
     let tools = Arc::new(tools);
-    bind_pack_registry(&tools);
+    bind_pack_registry(&pack_handle, &tools);
 
     let session = ToolPolicySession {
         profile: TaskProfile {
@@ -264,9 +264,9 @@ async fn a_use_skill_denial_names_a_delegate_this_session_can_call() {
 async fn a_session_without_the_delegate_is_not_told_to_call_it() {
     let mut tools: Vec<Box<dyn tinytools::Tool>> =
         vec![Box::new(RoutingFakeTool("propose_workflow"))];
-    append_pack_tools(&mut tools);
+    let pack_handle = append_pack_tools(&mut tools);
     let tools = Arc::new(tools);
-    bind_pack_registry(&tools);
+    bind_pack_registry(&pack_handle, &tools);
 
     let session = ToolPolicySession {
         profile: TaskProfile {
@@ -326,9 +326,9 @@ async fn use_skill_reaches_a_withheld_packed_tool() {
     use tinytools::ToolPolicyEngine;
 
     let mut tools: Vec<Box<dyn tinytools::Tool>> = vec![Box::new(RoutingFakeTool("goal_set"))];
-    append_pack_tools(&mut tools);
+    let pack_handle = append_pack_tools(&mut tools);
     let tools = Arc::new(tools);
-    bind_pack_registry(&tools);
+    bind_pack_registry(&pack_handle, &tools);
 
     // The real harness shape: seed `visible` with everything, then withhold the
     // packed names for a non-owner.
@@ -381,9 +381,9 @@ async fn a_prompt_hidden_delegate_is_not_offered_as_a_direct_route() {
             tool_description: "Build a workflow".to_string(),
         }),
     ];
-    append_pack_tools(&mut tools);
+    let pack_handle = append_pack_tools(&mut tools);
     let tools = Arc::new(tools);
-    bind_pack_registry(&tools);
+    bind_pack_registry(&pack_handle, &tools);
 
     // `build_workflow` is itself a member of the `workflows` pack, so
     // `strip_packed_from_visible` withholds it for a non-owner — leaving the
@@ -521,5 +521,18 @@ fn a_pack_member_this_session_never_registered_is_not_found_not_forbidden() {
     assert!(
         !message.contains("not allowed"),
         "absence must not read as a permission denial: {message}"
+    );
+}
+
+/// Only `use_skill` renders a pack listing. Any other registered tool whose
+/// arguments carry a string `skill` (an MCP schema, a stray key) must fall
+/// through to its own `execute`.
+#[tokio::test]
+async fn a_non_use_skill_call_with_a_skill_argument_is_not_rendered_as_a_listing() {
+    let mw = non_owner_middleware();
+    assert!(
+        mw.render_skill_for_session(&call("build_workflow", json!({ "skill": "workflows" })))
+            .is_none(),
+        "build_workflow was answered with a pack listing instead of executing"
     );
 }

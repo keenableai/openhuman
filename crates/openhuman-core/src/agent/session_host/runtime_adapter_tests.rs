@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tinyagents_harness::tool::ToolSnapshot;
 use tinyagents_runtime::{
     DriverFailure, DriverOutcome, DriverRequest, PrefixSnapshot, ResumeMode, SessionBuilder,
-    SessionDriver, SessionTerminal, SessionTurnRequest, ToolSnapshot, TranscriptCodec,
-    TranscriptTurnOptions, TurnOptions,
+    SessionDriver, SessionTerminal, SessionTurnRequest, TranscriptCodec, TranscriptTurnOptions,
+    TurnOptions,
 };
 use tinyagents_session::port::{InMemorySessionStores, SessionStoreProvider};
 use tinyagents_session::transcript::TranscriptMeta;
@@ -286,7 +287,7 @@ async fn committed_goal_accounting_uses_direct_and_completed_child_usage() {
     );
     crate::core::runtime::CoreContext::scope(core, async {
         let goal_store = crate::storage::sessions::stores_or_ephemeral(workspace.path()).kv;
-        tinyagents_graph::goals::store::set(
+        tinyagents_harness_tools::goals::store::set(
             &goal_store,
             "receipt-goal",
             "finish migration",
@@ -295,7 +296,7 @@ async fn committed_goal_accounting_uses_direct_and_completed_child_usage() {
         .await
         .unwrap();
         assert!(
-            tinyagents_graph::goals::store::get(&goal_store, "receipt-goal")
+            tinyagents_harness_tools::goals::store::get(&goal_store, "receipt-goal")
                 .await
                 .unwrap()
                 .is_some(),
@@ -319,7 +320,7 @@ async fn committed_goal_accounting_uses_direct_and_completed_child_usage() {
         sidecar.subagents.push(child);
         account_committed_turn_against_goal(workspace.path(), Some("receipt-goal"), &sidecar).await;
 
-        let goal = tinyagents_graph::goals::store::get(&goal_store, "receipt-goal")
+        let goal = tinyagents_harness_tools::goals::store::get(&goal_store, "receipt-goal")
             .await
             .unwrap()
             .unwrap();
@@ -329,7 +330,7 @@ async fn committed_goal_accounting_uses_direct_and_completed_child_usage() {
         );
         assert_eq!(
             goal.status,
-            tinyagents_graph::goals::ThreadGoalStatus::BudgetLimited,
+            tinyagents_harness_tools::goals::ThreadGoalStatus::BudgetLimited,
             "receipt-backed accounting advances continuation/budget state"
         );
     })
@@ -476,6 +477,7 @@ fn availability_notes_are_status_not_instructions() {
 /// thread would write into the same file.
 #[test]
 fn a_subagent_thread_binding_claims_no_session_identity() {
+    crate::agent::session_host::test_support::install_model_fixture();
     let tmp = tempfile::tempdir().unwrap();
     let config = crate::config::Config {
         workspace_dir: tmp.path().join("workspace"),
@@ -537,6 +539,7 @@ async fn cold_resumed_thread_can_send_again() {
     let new_host = || {
         crate::agent::SessionHostBuilder::new()
             .chat_model(model.clone())
+            .model_name("test/session-fixture".to_string())
             .tools(Vec::new())
             .workspace_dir(root.path().join("workspace"))
             .action_dir(root.path().to_path_buf())
@@ -585,6 +588,7 @@ async fn production_turn_path_wires_an_artifact_store_outside_the_project() {
         Arc::new(tinyagents_harness::testkit::ScriptedModel::new(Vec::new()));
     let mut host = crate::agent::SessionHostBuilder::new()
         .chat_model(model)
+        .model_name("test/session-fixture".to_string())
         .tools(Vec::new())
         .workspace_dir(workspace.path().to_path_buf())
         .action_dir(action_dir.path().to_path_buf())
@@ -631,6 +635,7 @@ async fn artifact_store_stays_in_the_workspace_without_a_descriptor() {
         Arc::new(tinyagents_harness::testkit::ScriptedModel::new(Vec::new()));
     let mut host = crate::agent::SessionHostBuilder::new()
         .chat_model(model)
+        .model_name("test/session-fixture".to_string())
         .tools(Vec::new())
         .workspace_dir(workspace.path().to_path_buf())
         .action_dir(action_dir.path().to_path_buf())
@@ -687,6 +692,7 @@ async fn reply_language_directive_rides_each_user_message_until_cleared_body() {
     ]));
     let mut host = crate::agent::SessionHostBuilder::new()
         .chat_model(model.clone() as Arc<dyn tinyinference_llm::model::ChatModel<()>>)
+        .model_name("test/session-fixture".to_string())
         .tools(Vec::new())
         .workspace_dir(root.path().join("workspace"))
         .action_dir(root.path().to_path_buf())

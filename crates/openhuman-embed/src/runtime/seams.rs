@@ -34,6 +34,7 @@ use openhuman_core::agent::tinyagents::discovery::{
 };
 use openhuman_core::core::all::{register_controller_extension, ControllerExtension};
 use openhuman_core::core::server_launcher::{install_server_launcher, ServerLauncher};
+use openhuman_core::core::slots::Extensions;
 use openhuman_core::security::SecurityPolicy;
 use openhuman_core::storage::StorageBackend;
 use tinytools::ToolRanker;
@@ -56,7 +57,7 @@ impl std::fmt::Debug for StorageSource {
         // A URL can carry credentials: never print it.
         match self {
             Self::Url(_) => f.write_str("StorageSource::Url(<redacted>)"),
-            Self::Backend(backend) => write!(f, "StorageSource::Backend({})", backend.driver()),
+            Self::Backend(_) => f.write_str("StorageSource::Backend(<custom>)"),
         }
     }
 }
@@ -83,12 +84,16 @@ impl From<Arc<dyn StorageBackend>> for StorageSource {
 #[derive(Default)]
 pub(crate) struct HostSeams {
     pub(crate) controller_extensions: Vec<ControllerExtension>,
+    pub(crate) core_extensions: Extensions,
     pub(crate) tool_ranker: Option<Arc<dyn ToolRanker>>,
     pub(crate) post_turn_hooks: Vec<Arc<dyn LearningSink>>,
     pub(crate) tool_hooks: Vec<Arc<dyn ToolHook<OpenHumanRunContext>>>,
     pub(crate) server_launcher: Option<ServerLauncher>,
     pub(crate) live_policy: Option<Arc<SecurityPolicy>>,
     pub(crate) storage: Option<StorageSource>,
+    /// Driver metadata from a configured URL, retained after it is opened.
+    /// Custom backends have no inferred driver identity.
+    pub(crate) storage_driver: Option<String>,
 }
 
 impl HostSeams {
@@ -100,6 +105,12 @@ impl HostSeams {
     /// The URL could not be parsed or opened.
     pub(crate) async fn open_storage(&mut self) -> Result<(), String> {
         if let Some(StorageSource::Url(url)) = &self.storage {
+            self.storage_driver = Some(
+                openhuman_core::storage::StorageUrl::parse(url)
+                    .map_err(|_| String::from("invalid storage URL"))?
+                    .driver()
+                    .to_string(),
+            );
             let backend = openhuman_core::storage::open(url)
                 .await
                 .map_err(|error| format!("opening the storage backend: {error}"))?;
@@ -114,6 +125,12 @@ impl HostSeams {
         let Some(StorageSource::Url(url)) = self.storage.take() else {
             return Ok(());
         };
+        self.storage_driver = Some(
+            openhuman_core::storage::StorageUrl::parse(&url)
+                .map_err(|_| String::from("invalid storage URL"))?
+                .driver()
+                .to_string(),
+        );
         let backend =
             openhuman_core::storage::block_on(
                 async move { openhuman_core::storage::open(&url).await },
@@ -205,8 +222,8 @@ impl HostSeams {
             Some(StorageSource::Backend(backend)) => {
                 let previous = openhuman_core::storage::install(Arc::clone(&backend));
                 log::debug!(
-                    "[embed][seams] storage backend installed driver={} replaced={}",
-                    backend.driver(),
+                    "[embed][seams] storage backend installed source_driver={:?} replaced={}",
+                    self.storage_driver,
                     previous.is_some()
                 );
                 Some((backend, previous))
@@ -407,6 +424,17 @@ impl Drop for InstalledSeams {
 }
 
 impl RuntimeBuilder {
+    /// Configure context-scoped core hooks before this runtime is built.
+    ///
+    /// The callback receives the same extension set that is attached to the
+    /// runtime's `CoreContext`; registrations remain isolated from other core
+    /// contexts in the process. This is intended for layered host crates.
+    #[doc(hidden)]
+    pub fn configure_core_extensions(self, configure: impl FnOnce(&Extensions)) -> Self {
+        configure(&self.seams.core_extensions);
+        self
+    }
+
     /// Contribute controllers to the core's registry, as the TinyHumans layer
     /// does for its hosted RPC proxies. May be called more than once.
     ///
