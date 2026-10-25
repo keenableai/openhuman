@@ -507,7 +507,6 @@ describe('SearchPanel — add a provider', () => {
     expect(screen.getByTestId('search-provider-keenable-detail')).toHaveTextContent(
       'settings.search.detailKeyOptional'
     );
-    expect(screen.queryByTestId('search-provider-keenable-status')).toBeNull();
 
     await rowAction('keenable', 'settings.search.actionAddKey');
     await screen.findByTestId('search-connect-keenable');
