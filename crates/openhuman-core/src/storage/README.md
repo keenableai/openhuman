@@ -89,7 +89,12 @@ it with the core stopped.
 ## Entry points
 
 - `configured_url(&Config)` / `url_from(env, &Config)`: the URL in effect.
-- `open(url)`: parse and open a backend (credentials are redacted in logs).
+- `open(url)`: parse and open a backend (credentials are redacted in logs) The
+  driver connects on the process's storage runtime (two `openhuman-storage`
+  worker threads, alive for the whole process), so MongoDB's connection-time
+  pool and monitor tasks do not depend on the host runtime. Cleanup tasks
+  registered by later object drops can run on the internal `storage::block_on`
+  runtime instead.
 - `install(backend)` / `installed()` / `clear()`: the process slot domains
   read the backend from.
 - `scope_for_agent(agent_id)`: the storage scope (`local/agent:<id>`) an agent's records live
@@ -135,7 +140,9 @@ it with the core stopped.
   host; an error in SaaS mode without a profile — and the installed backend
   under it.
 - `block_on(future)`: runs a storage future from synchronous store code on
-  one shared runtime thread.
+  one shared runtime thread. The future depends only on that thread and the
+  storage runtime, so callers blocked on it cannot starve the host runtime of
+  the threads a backend needs.
 - `documents::Repo` and `documents::compare_and_swap`: the base the domain
   stores build on. A `Repo` holds one domain's scoped document handle,
   declares its collections and runs each call on the blocking bridge;
@@ -300,8 +307,8 @@ without fencing).
   backend through `flows::catalog_storage` and its `CatalogStorage` bus
   contract; the Schedule service accesses cron documents through
   `cron::documents_port`. The modules own their schemas, migrations, flow state,
-  and run checkpoints. The delegation graph's checkpointer uses
-  tinyagents-graph's `DriverCheckpointer`.
+  and run checkpoints. TinyFlows' `DriverCheckpointer` schema and migrations
+  are declared by `tinyflows_drivers::graph_checkpoint_schema()`.
 - `block_on_anyhow(future)`: `block_on` for those stores, whose errors are
   `anyhow::Error`.
 - Approvals (`security::approval`), through `store_documents.rs`.
@@ -371,6 +378,6 @@ storage itself.
 
 - `scope.rs`: the one scope grammar (`tenant_scope`, `scope_for_profile`, `scope_for_agent`, `scope_for_module`), built on tsd's `Scope::tenant/local/agent/module`.
 - `schema.rs`: `collection_owners()` validates linked crates' `CollectionSpec` declarations without merging owners; `module_collections(owner)` feeds module grants.
-- `boot.rs`: `prepare_and_migrate`, called by `open`, ensures each linked crate's collections in the host's local and cluster scopes. Tenant, agent and module scopes are prepared by their owners when opened.
+- `boot.rs`: `prepare_and_migrate`, called by `open`, ensures each linked crate's collections in the host's local and cluster scopes and runs the tinyagents graph and harness owner migrations there (a failure is logged and retried at the next boot). Tenant, agent and module scopes are prepared (`prepare_scope`, the same migrations included) by their owners when opened.
 - `scope_move.rs`: the resumable copy of v1 scopes (`profile:`, `<profile>~<agent>`, raw agent ids, `module:<id>@<base>`, the `*-sha256:` fallbacks) into the v2 scopes.
 - The generated reference is `docs/storage-schema.md`; `node scripts/ci/check-storage-schema.mjs` lints the current collection names, indexes, expiry fields and search fields.

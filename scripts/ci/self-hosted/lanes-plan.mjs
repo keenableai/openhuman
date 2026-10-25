@@ -274,10 +274,15 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
       checks: [
         {
           name: "pnpm-install",
-          // ex63: also for a core change, so rust-core-coverage's mock backend
-          // (scripts/mock-api-server.mjs imports `ws`) can start when no
-          // frontend file changed. One install per VM: lanes share a checkout.
-          when: areas.frontend || areas.i18n || areas.scripts || (ex63 && core),
+          // ex63: also whenever rust-core-coverage runs (a core or storage
+          // change), so its mock backend (scripts/mock-api-server.mjs imports
+          // `ws`) can start when no frontend file changed. One install per VM:
+          // lanes share a checkout.
+          when:
+            areas.frontend ||
+            areas.i18n ||
+            areas.scripts ||
+            (ex63 && (core || areas.storage)),
           run: "pnpm install --frozen-lockfile",
         },
         {
@@ -397,7 +402,7 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
         // deps the mock backend needs itself (ex63 reuses frontend's install).
         {
           name: "pnpm-install",
-          when: !ex63 && core,
+          when: !ex63 && (core || areas.storage),
           run: "pnpm install --frozen-lockfile",
         },
         {
@@ -462,6 +467,13 @@ export function buildPlan({ profile, areas, env = {}, isPullRequest = true }) {
           name: "embed-check-no-default",
           when: core,
           run: "cargo check -p openhuman-embed --no-default-features",
+        },
+        // Hosts such as Chottu run modules with neither legacy storage import
+        // nor the encrypted secrets file; both are gated separately.
+        {
+          name: "embed-check-no-default-modules",
+          when: core,
+          run: "bash scripts/ci-cancel-aware.sh cargo check -p openhuman-embed --no-default-features --features modules",
         },
         // Consumers such as TinySweeper enable tracing without native modules.
         {

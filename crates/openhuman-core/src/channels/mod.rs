@@ -37,7 +37,9 @@ pub mod providers;
 mod routes;
 #[cfg(all(test, feature = "channels"))]
 pub(crate) use routes::register_hosted_route_test_policy;
-#[cfg(feature = "channels")]
+// Ungated: the agent domain's `agent.run_turn` handler drives every turn
+// through `runtime::turn_driver`, with or without the `channels` feature.
+// Everything else in `runtime` carries its own `channels` gate.
 mod runtime;
 #[cfg(feature = "channels")]
 pub(crate) mod system_prompt;
@@ -116,6 +118,7 @@ pub use runtime::test_support;
 pub use prompt::build_system_prompt;
 #[cfg(feature = "channels")]
 pub use runtime::start_channels;
+pub(crate) use runtime::turn_driver::run_channel_turn;
 #[cfg(feature = "channels")]
 pub(crate) use runtime::{session, start_channels_with_session};
 
